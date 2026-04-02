@@ -103,7 +103,7 @@ class WindForceResult:
     total_force_N:       float
     transverse_force_N:  float
     longitudinal_force_N: float
-    wind_type:           str   # "offshore" | "onshore" | "parallel"
+    wind_type:           str   # "offshore" | "onshore" | "headwind" | "tailwind"
 
 
 @dataclass
@@ -124,7 +124,7 @@ class RiskWindowResult:
     max_wave_height:    float = 0.0        # 窗口內最大顯著浪高 (m)
     max_wave_period:    float = 0.0        # 窗口內最大波浪週期 (s)
     high_risk_hours:    int   = 0          # 高風險小時數
-    dominant_wind_type: str   = ""         # 'offshore'|'onshore'|'parallel'
+    dominant_wind_type: str   = ""         # 'offshore'|'onshore'|'headwind'|'tailwind'
     window_start:       Optional[datetime] = None
     window_end:         Optional[datetime] = None
     has_data:           bool  = True
@@ -501,13 +501,26 @@ class WeatherAnalyzer:
         wind_ms  = knots_to_ms(record.wind_gust)
         wind_deg = compass_to_degrees(record.wind_direction)
 
+        # relative: -180~+180，用於物理力計算
         relative = (wind_deg - heading + 180) % 360 - 180
         abs_rel  = abs(relative)
 
-        if 45 <= abs_rel <= 135:
-            wind_type = "offshore" if relative > 0 else "onshore"
+        # ── 四象限風型判斷 ──────────────────────────────────────
+        # rel360: 0=船艏, 90=左舷, 180=船艉, 270=右舷
+        rel360 = (wind_deg - heading + 360) % 360
+        side   = str(vessel.berthing_side).lower().strip()
+        is_stbd = any(k in side for k in ("starboard", "右", "s", "stbd"))
+
+        if rel360 < 45 or rel360 >= 315:
+            wind_type = "headwind"
+        elif 45 <= rel360 < 135:
+            # 風從左舷方向來
+            wind_type = "onshore" if not is_stbd else "offshore"
+        elif 135 <= rel360 < 225:
+            wind_type = "tailwind"
         else:
-            wind_type = "parallel"
+            # 風從右舷方向來 (225 <= rel360 < 315)
+            wind_type = "offshore" if not is_stbd else "onshore"
 
         drag_coef   = getattr(vessel, "wind_drag_coef", 1.0)
         total_N     = 0.5 * AIR_DENSITY * drag_coef * vessel.wind_area * wind_ms ** 2

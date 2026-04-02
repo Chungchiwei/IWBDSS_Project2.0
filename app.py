@@ -473,7 +473,7 @@ if st.session_state.result:
     ])
 
     with tab1:
-        render_berthing_advisory(res, ves)
+        render_berthing_advisory(res, ves, analyzer)
         render_detail_report(res, sidebar_data)
 
     with tab2:

@@ -57,11 +57,25 @@ def _risk_row_style(risk_level_zh: str, num_cols: int) -> list[str]:
     依中文風險等級回傳 DataFrame 列背景色。
     使用 RISK_LEVEL_SPECS 的 color_bg，不硬寫顏色碼。
     """
-    _ZH_TO_KEY = {"低風險": "low", "中風險": "medium", "高風險": "high", "極高風險": "extreme"}
+    # key must match RISK_LEVEL_SPECS.name_zh exactly
+    _ZH_TO_KEY = {spec.name_zh: key for key, spec in RISK_LEVEL_SPECS.items()}
     key   = _ZH_TO_KEY.get(risk_level_zh, "low")
     spec  = RISK_LEVEL_SPECS.get(key)
     color = spec.color_bg if spec else ""
     return [f"background-color: {color}" if color else ""] * num_cols
+
+
+def _classify_op_risk(gust_kts: float, wind_kts: float, wave_m: float) -> str:
+    """依作業閾值（航海標準）分類風險等級 key"""
+    def _tier(val: float, thr: dict) -> int:
+        if val >= thr["danger"]:  return 3
+        if val >= thr["warning"]: return 2
+        if val >= thr["caution"]: return 1
+        return 0
+    level = max(_tier(gust_kts, _GUST_THR),
+                _tier(wind_kts, _WIND_THR),
+                _tier(wave_m,   _WAVE_THR))
+    return ["low", "medium", "high", "extreme"][level]
 
 
 def _render_recommendation(rec: str) -> None:
@@ -409,13 +423,25 @@ def render_kpi_metrics(result: AnalysisResult) -> None:
 # ================= 靠離泊作業建議 =================
 
 def _wind_type_label(wind_type: str) -> str:
-    """將 offshore/onshore/parallel 轉為中文標籤"""
-    return {"offshore": "吹開風", "onshore": "攏風", "parallel": "側風"}.get(wind_type, "未知")
+    """將 wind_type 英文代碼轉為中文標籤"""
+    return {
+        "offshore": "吹開風",
+        "onshore":  "攏風",
+        "parallel": "側風",    # 舊版相容
+        "headwind": "逆風",
+        "tailwind": "順風",
+    }.get(wind_type, "未知")
 
 
 def _wind_type_color(wind_type: str) -> str:
-    """吹開/攏/側風對應警示顏色"""
-    return {"offshore": "green", "onshore": "red", "parallel": "orange"}.get(wind_type, "gray")
+    """風型對應警示顏色"""
+    return {
+        "offshore": "green",
+        "onshore":  "red",
+        "parallel": "orange",  # 舊版相容
+        "headwind": "blue",
+        "tailwind": "blue",
+    }.get(wind_type, "gray")
 
 
 def _wave_period_type(period_s: float) -> str:
@@ -427,6 +453,145 @@ def _wave_period_type(period_s: float) -> str:
     if period_s >= 6:
         return f"{period_s:.1f}s（混合浪）"
     return f"{period_s:.1f}s（風浪）"
+
+
+# ── 閾值常數 ──────────────────────────────────────────────────
+_GUST_THR  = {"caution": 28.0, "warning": 34.0, "danger": 41.0}
+_WIND_THR  = {"caution": 22.0, "warning": 28.0, "danger": 34.0}
+_WAVE_THR  = {"caution": 2.5,  "warning": 3.5,  "danger": 4.0}
+
+
+def _thr_color(val: float, thr: dict) -> str:
+    """依閾值回傳 CSS 顏色（正常→灰、警戒→藍、警告→橙、危險→紅）"""
+    if val >= thr["danger"]:
+        return "#B91C1C"
+    if val >= thr["warning"]:
+        return "#B45309"
+    if val >= thr["caution"]:
+        return "#1D4ED8"
+    return "#374151"
+
+
+def _metric_html(label: str, value: str, color: str, note: str = "") -> str:
+    """回傳一個有顏色的指標 HTML 區塊"""
+    note_html = f"<div style='font-size:0.75em;color:#6B7280;margin-top:1px'>{note}</div>" if note else ""
+    return (
+        f"<div style='background:#F9FAFB;border-radius:6px;padding:8px 10px;"
+        f"margin-bottom:6px;border-left:3px solid {color}'>"
+        f"<div style='font-size:0.75em;color:#6B7280'>{label}</div>"
+        f"<div style='font-size:1.1em;font-weight:bold;color:{color}'>{value}</div>"
+        f"{note_html}</div>"
+    )
+
+
+def _wx_zh(codes: list) -> str:
+    _MAP = {"CLR": "晴", "CLOUDY": "多雲", "OVERCAST": "陰", "FOG": "霧",
+            "MIST": "薄霧", "RAIN": "雨", "DRIZZLE": "毛雨", "SNOW": "雪",
+            "THUNDER": "雷暴", "SLEET": "雨夾雪", "HAZE": "霾"}
+    return "、".join(dict.fromkeys(_MAP.get(c, c) for c in codes)) or "N/A"
+
+
+def _render_op_col(col, window, label: str, op_time, header_color: str) -> None:
+    """在 Streamlit column 內渲染單一作業時窗卡片"""
+    with col:
+        is_night = op_time.hour >= 20 or op_time.hour < 6
+        night_tag = " 🌙" if is_night else ""
+        st.markdown(
+            f"<div style='background:{header_color};color:#fff;padding:8px 12px;"
+            f"border-radius:8px 8px 0 0;font-weight:bold;font-size:1em'>"
+            f"{label}{night_tag}"
+            f"<span style='font-weight:normal;font-size:0.85em;margin-left:8px;opacity:0.9'>"
+            f"{op_time.strftime('%m/%d %H:%M')}</span></div>",
+            unsafe_allow_html=True,
+        )
+
+        if window is None or not getattr(window, "has_data", False):
+            st.markdown(
+                "<div style='background:#F3F4F6;border-radius:0 0 8px 8px;"
+                "padding:16px;text-align:center;color:#9CA3AF'>無該時段氣象資料</div>",
+                unsafe_allow_html=True,
+            )
+            return
+
+        # 取值
+        max_gust   = getattr(window, "max_wind_gust",      0.0) or 0.0
+        max_dir    = getattr(window, "max_wind_direction",  "")
+        hr_hours   = getattr(window, "high_risk_hours",     0)  or 0
+        max_wave   = getattr(window, "max_wave_height",     0.0) or 0.0
+        max_period = getattr(window, "max_wave_period",     0.0) or 0.0
+        avg_temp   = getattr(window, "avg_temp",            None)
+        min_vis_m  = getattr(window, "min_vis_m",           None)
+        wx_codes   = getattr(window, "weather_codes",       [])
+        ws         = getattr(window, "window_start",        None)
+        we         = getattr(window, "window_end",          None)
+        wt         = getattr(window, "dominant_wind_type",  "")
+        all_risks  = list(getattr(window, "risks", [])) + list(getattr(window, "condition_risks", []))
+
+        # 卡片主體
+        body_parts = []
+
+        # 風型 badge
+        wt_label = _wind_type_label(wt)
+        wt_color = _wind_type_color(wt)
+        wt_icon  = {"offshore": "⬆", "onshore": "⬇", "headwind": "⬅", "tailwind": "➡", "parallel": "↔"}.get(wt, "↔")
+        body_parts.append(
+            f"<div style='background:{wt_color}18;border:1px solid {wt_color}44;"
+            f"border-radius:4px;padding:4px 8px;margin-bottom:8px;display:inline-block;"
+            f"color:{wt_color};font-weight:bold;font-size:0.9em'>"
+            f"{wt_icon} {wt_label}</div>"
+        )
+
+        # 時窗
+        if ws and we:
+            body_parts.append(
+                f"<div style='font-size:0.75em;color:#6B7280;margin-bottom:6px'>"
+                f"⏱ 時窗 {ws.strftime('%H:%M')}–{we.strftime('%H:%M')}</div>"
+            )
+
+        # 最大陣風
+        gust_color = _thr_color(max_gust, _GUST_THR)
+        gust_note  = f"↑ {max_dir}" if max_dir else ""
+        body_parts.append(_metric_html("最大陣風", f"{max_gust:.1f} kts", gust_color, gust_note))
+
+        # 高風險時段
+        risk_color = "#B91C1C" if hr_hours >= 6 else "#B45309" if hr_hours >= 3 else "#1D4ED8" if hr_hours >= 1 else "#374151"
+        body_parts.append(_metric_html("高風險時段", f"{hr_hours} 小時", risk_color))
+
+        # 最大浪高
+        wave_color = _thr_color(max_wave, _WAVE_THR)
+        wave_note  = _wave_period_type(max_period) if max_period > 0 else ""
+        body_parts.append(_metric_html("最大浪高", f"{max_wave:.1f} m", wave_color, wave_note))
+
+        # 氣溫
+        if avg_temp is not None:
+            temp_color = "#B45309" if avg_temp < 5 else "#374151"
+            temp_note  = "⚠ 低溫警示" if avg_temp < 5 else ""
+            body_parts.append(_metric_html("平均氣溫", f"{avg_temp:.1f}°C", temp_color, temp_note))
+
+        # 能見度
+        if min_vis_m is not None:
+            vis_str = f"{min_vis_m/1000:.1f} km" if min_vis_m >= 1000 else f"{int(min_vis_m)} m"
+            vis_color = "#B91C1C" if min_vis_m < 1000 else "#B45309" if min_vis_m < 3000 else "#374151"
+            vis_note  = "⚠ 濃霧" if min_vis_m < 1000 else ("偏低" if min_vis_m < 3000 else "")
+            body_parts.append(_metric_html("最低能見度", vis_str, vis_color, vis_note))
+
+        # 天氣概況
+        if wx_codes:
+            body_parts.append(_metric_html("天氣概況", _wx_zh(wx_codes), "#374151"))
+
+        # 風險警示
+        for risk in all_risks:
+            body_parts.append(
+                f"<div style='background:#FEF2F2;border-left:3px solid #B91C1C;"
+                f"border-radius:4px;padding:5px 8px;margin-top:4px;"
+                f"font-size:0.82em;color:#B91C1C'>🚨 {risk}</div>"
+            )
+
+        st.markdown(
+            f"<div style='background:#fff;border:1px solid #E5E7EB;border-top:none;"
+            f"border-radius:0 0 8px 8px;padding:12px'>{''.join(body_parts)}</div>",
+            unsafe_allow_html=True,
+        )
 
 
 def render_berthing_advisory(
@@ -443,148 +608,73 @@ def render_berthing_advisory(
 
     st.subheader("⚓ 靠離泊作業建議")
 
-    col_arr, col_dep = st.columns(2)
+    col_arr, col_dep, col_port = st.columns(3)
 
-    for col, window, label, op_time in [
-        (col_arr, arr, "靠泊", vessel.arrival_time),
-        (col_dep, dep, "離泊", vessel.departure_time),
-    ]:
-        with col:
-            is_night = op_time.hour >= 20 or op_time.hour < 6
-            night_tag = "&nbsp;🌙" if is_night else ""
-            st.markdown(
-                f"<div style='font-weight:bold;font-size:1.05em;margin-bottom:6px'>"
-                f"{label}時窗{night_tag} &nbsp;"
-                f"<span style='font-weight:normal;color:#888'>{op_time.strftime('%m/%d %H:%M')}</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+    # ── 靠泊天氣 ────────────────────────────────────────────────
+    _render_op_col(col_arr, arr, "🚢 靠泊天氣", vessel.arrival_time, "#1E40AF")
 
-            if window is None or not getattr(window, "has_data", False):
-                st.info("無該時段氣象資料")
-                continue
+    # ── 離泊天氣 ────────────────────────────────────────────────
+    _render_op_col(col_dep, dep, "⚓ 離泊天氣", vessel.departure_time, "#065F46")
 
-            # 風向類型 badge
-            wt       = getattr(window, "dominant_wind_type", "")
-            wt_label = _wind_type_label(wt)
-            wt_color = _wind_type_color(wt)
-            wt_icon  = "⬆" if wt == "offshore" else "⬇" if wt == "onshore" else "↔"
-            st.markdown(
-                f"<div style='background:{wt_color}22;border-left:4px solid {wt_color};"
-                f"padding:5px 10px;border-radius:4px;margin-bottom:8px'>"
-                f"<span style='color:{wt_color};font-weight:bold;font-size:1.05em'>"
-                f"{wt_icon} {wt_label}</span></div>",
-                unsafe_allow_html=True,
-            )
+    # ── 在港天氣 ────────────────────────────────────────────────
+    with col_port:
+        st.markdown(
+            "<div style='background:#7C3AED;color:#fff;padding:8px 12px;"
+            "border-radius:8px 8px 0 0;font-weight:bold;font-size:1em'>📊 在港天氣</div>",
+            unsafe_allow_html=True,
+        )
 
-            # 風浪指標：最大陣風 | 高風險時段 | 最大浪高
-            max_gust   = getattr(window, "max_wind_gust",      0.0)
-            max_dir    = getattr(window, "max_wind_direction",  "")
-            hr_hours   = getattr(window, "high_risk_hours",     0)
-            max_wave   = getattr(window, "max_wave_height",     0.0)
-            max_period = getattr(window, "max_wave_period",     0.0)
+        inport_body = []
 
-            m1, m2, m3 = st.columns(3)
-            m1.metric("最大陣風",   f"{max_gust:.1f} kts", f"↑ {max_dir}" if max_dir else None)
-            m2.metric("高風險時段", f"{hr_hours} 小時",
-                      delta_color="inverse" if hr_hours > 0 else "normal")
-            m3.metric("最大浪高",   f"{max_wave:.1f} m")
+        if analyzer is not None and getattr(analyzer, "conditions", []):
+            summary = analyzer.inport_condition_summary(vessel)
+            if summary:
+                avg_t  = summary.get("avg_temp")
+                min_t  = summary.get("min_temp")
+                min_v  = summary.get("min_vis_m")
+                avg_v  = summary.get("avg_vis_m")
+                wx_c   = summary.get("weather_codes", [])
+                risks  = summary.get("condition_risks", [])
 
-            # 時窗 + 浪型
-            ws = getattr(window, "window_start", None)
-            we = getattr(window, "window_end",   None)
-            caption_parts = []
-            if ws and we:
-                caption_parts.append(f"時窗 {ws.strftime('%H:%M')}–{we.strftime('%H:%M')}")
-            if max_period > 0:
-                caption_parts.append(_wave_period_type(max_period))
-            if caption_parts:
-                st.caption("  |  ".join(caption_parts))
+                if avg_t is not None:
+                    temp_color = "#B45309" if (min_t is not None and min_t < 5) else "#374151"
+                    temp_note  = f"最低 {min_t:.1f}°C{'  ⚠ 低溫' if min_t < 5 else ''}" if min_t is not None else ""
+                    inport_body.append(_metric_html("平均氣溫", f"{avg_t:.1f}°C", temp_color, temp_note))
 
-            # 天氣狀況：溫度 | 能見度 | 天氣代碼
-            avg_temp      = getattr(window, "avg_temp",      None)
-            min_vis_m     = getattr(window, "min_vis_m",     None)
-            weather_codes = getattr(window, "weather_codes", [])
+                if min_v is not None:
+                    vis_str   = f"{min_v/1000:.1f} km" if min_v >= 1000 else f"{int(min_v)} m"
+                    vis_color = "#B91C1C" if min_v < 1000 else "#B45309" if min_v < 3000 else "#374151"
+                    vis_note  = ""
+                    if avg_v is not None:
+                        avg_v_str = f"{avg_v/1000:.1f} km" if avg_v >= 1000 else f"{int(avg_v)} m"
+                        vis_note  = f"平均 {avg_v_str}"
+                    inport_body.append(_metric_html("最低能見度", vis_str, vis_color, vis_note))
 
-            has_cond_data = avg_temp is not None or min_vis_m is not None
-            if has_cond_data:
-                st.markdown(
-                    "<div style='font-size:0.8em;color:#888;margin-top:6px'>天氣狀況</div>",
-                    unsafe_allow_html=True,
-                )
-                c1, c2, c3 = st.columns(3)
-                c1.metric(
-                    "氣溫",
-                    f"{avg_temp:.1f}°C" if avg_temp is not None else "N/A",
-                    delta="⚠ 低溫" if (avg_temp is not None and avg_temp < 5) else None,
-                    delta_color="inverse",
-                )
-                vis_str = (
-                    f"{min_vis_m/1000:.1f} km" if min_vis_m is not None and min_vis_m >= 1000
-                    else f"{int(min_vis_m)} m" if min_vis_m is not None
-                    else "N/A"
-                )
-                vis_delta = None
-                if min_vis_m is not None:
-                    vis_delta = "⚠ 霧" if min_vis_m < 1000 else ("偏低" if min_vis_m < 3000 else None)
-                c2.metric("最低能見度", vis_str, delta=vis_delta,
-                          delta_color="inverse" if vis_delta else "normal")
-                wx_str = "、".join(
-                    dict.fromkeys(
-                        {"CLR": "晴", "CLOUDY": "多雲", "OVERCAST": "陰",
-                         "FOG": "霧", "MIST": "薄霧", "RAIN": "雨",
-                         "DRIZZLE": "毛雨", "SNOW": "雪", "THUNDER": "雷暴",
-                         "SLEET": "雨夾雪", "HAZE": "霾"}.get(c, c)
-                        for c in weather_codes
+                if wx_c:
+                    inport_body.append(_metric_html("天氣概況", _wx_zh(wx_c), "#374151"))
+
+                inport_body.append(_metric_html("氣象資料筆數", f"{len(analyzer.conditions)} 筆", "#374151"))
+
+                for risk in risks:
+                    inport_body.append(
+                        f"<div style='background:#FFFBEB;border-left:3px solid #B45309;"
+                        f"border-radius:4px;padding:5px 8px;margin-top:4px;"
+                        f"font-size:0.82em;color:#B45309'>⚠️ {risk}</div>"
                     )
-                ) or "N/A"
-                c3.metric("天氣", wx_str)
-
-            # 風險警示（風浪 + 天氣狀況）
-            all_risks = list(getattr(window, "risks", [])) + list(getattr(window, "condition_risks", []))
-            for risk in all_risks:
-                st.error(f"🚨 {risk}")
-
-    # ── 在港期間整體天氣摘要 ─────────────────────────────────
-    if analyzer is not None and getattr(analyzer, "conditions", []):
-        summary = analyzer.inport_condition_summary(vessel)
-        if summary:
-            st.markdown("**在港期間天氣摘要**")
-            sc1, sc2, sc3, sc4 = st.columns(4)
-            avg_t = summary.get("avg_temp")
-            min_t = summary.get("min_temp")
-            min_v = summary.get("min_vis_m")
-            avg_v = summary.get("avg_vis_m")
-            sc1.metric("平均氣溫",
-                       f"{avg_t:.1f}°C" if avg_t is not None else "N/A",
-                       delta=f"最低 {min_t:.1f}°C" if min_t is not None else None,
-                       delta_color="inverse" if (min_t is not None and min_t < 5) else "normal")
-            min_v_str = (
-                f"{min_v/1000:.1f} km" if min_v is not None and min_v >= 1000
-                else f"{int(min_v)} m" if min_v is not None else "N/A"
-            )
-            avg_v_str = (
-                f"均 {avg_v/1000:.1f} km" if avg_v is not None and avg_v >= 1000
-                else f"均 {int(avg_v)} m" if avg_v is not None else None
-            )
-            sc2.metric("最低能見度", min_v_str, delta=avg_v_str,
-                       delta_color="inverse" if (min_v is not None and min_v < 1000) else "normal")
-
-            wx_codes = summary.get("weather_codes", [])
-            wx_zh = "、".join(
-                dict.fromkeys(
-                    {"CLR": "晴", "CLOUDY": "多雲", "FOG": "霧", "MIST": "薄霧",
-                     "RAIN": "雨", "THUNDER": "雷暴", "SNOW": "雪",
-                     "SLEET": "雨夾雪", "DRIZZLE": "毛雨", "OVERCAST": "陰",
-                     "HAZE": "霾"}.get(c, c)
-                    for c in wx_codes
+            else:
+                inport_body.append(
+                    "<div style='color:#9CA3AF;font-size:0.9em;text-align:center;padding:8px'>無在港天氣摘要</div>"
                 )
-            ) or "N/A"
-            sc3.metric("天氣概況", wx_zh)
-            sc4.metric("資料筆數", f"{len(analyzer.conditions)} 筆")
+        else:
+            inport_body.append(
+                "<div style='color:#9CA3AF;font-size:0.9em;text-align:center;padding:8px'>無在港天氣資料</div>"
+            )
 
-            for risk in summary.get("condition_risks", []):
-                st.warning(f"⚠️ {risk}")
+        st.markdown(
+            f"<div style='background:#fff;border:1px solid #E5E7EB;border-top:none;"
+            f"border-radius:0 0 8px 8px;padding:12px'>{''.join(inport_body)}</div>",
+            unsafe_allow_html=True,
+        )
 
     st.markdown("---")
 
@@ -906,7 +996,19 @@ def render_data_list(
             elif fmt == "factor":
                 show_df[display_name] = pd.to_numeric(raw, errors="coerce").round(2)
             elif fmt == "risk":
-                show_df[display_name] = raw.map(_RISK_ZH)
+                # 使用作業閾值重新分類，讓超標數據正確顯示高風險
+                gust_col = display_df.get("wind_gust_kts", pd.Series(0.0, index=display_df.index))
+                wind_col = display_df.get("wind_speed_kts", pd.Series(0.0, index=display_df.index))
+                wave_col = display_df.get("wave_sig_m",    pd.Series(0.0, index=display_df.index))
+                op_risk  = [
+                    _classify_op_risk(
+                        float(g) if pd.notna(g) else 0.0,
+                        float(w) if pd.notna(w) else 0.0,
+                        float(v) if pd.notna(v) else 0.0,
+                    )
+                    for g, w, v in zip(gust_col, wind_col, wave_col)
+                ]
+                show_df[display_name] = [_RISK_ZH.get(k, k) for k in op_risk]
             else:
                 show_df[display_name] = raw
 
@@ -918,8 +1020,33 @@ def render_data_list(
         risk_zh = str(row.get("風險", ""))
         return _risk_row_style(risk_zh, len(row))
 
+    def _cell_style(series: pd.Series, thr: dict) -> pd.Series:
+        """對單一欄位各儲存格依閾值套用文字顏色 + 粗體"""
+        def _fmt(val):
+            try:
+                v = float(val)
+            except (TypeError, ValueError):
+                return ""
+            color = _thr_color(v, thr)
+            if color == "#374151":   # 正常值，不特別標示
+                return ""
+            return f"color: {color}; font-weight: bold"
+        return series.map(_fmt)
+
+    styler = show_df.style.apply(_highlight_risk, axis=1)
+
+    _COL_THR = {
+        "陣風(kts)": _GUST_THR,
+        "風速(kts)": _WIND_THR,
+        "浪高(m)":   _WAVE_THR,
+        "最大浪(m)": _WAVE_THR,
+    }
+    for col_name, thr in _COL_THR.items():
+        if col_name in show_df.columns:
+            styler = styler.apply(_cell_style, thr=thr, subset=[col_name])
+
     st.dataframe(
-        show_df.style.apply(_highlight_risk, axis=1),
+        styler,
         use_container_width=True,
         height=500,
     )
