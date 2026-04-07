@@ -62,15 +62,23 @@ def ensure_chinese_font() -> str:
     Returns:
         實際套用的字體名稱。
     """
-    # ✅ 新增這兩行：強制清除 Matplotlib 字體快取
-    # 雲端環境安裝新字型後，必須重掃才能被偵測到
-    fm._load_fontmanager(try_read_cache=False)
+    # ✅ 正確清除字體快取的方式（相容 Matplotlib 3.7+）
+    # 強制重建 FontManager，讓系統新安裝的字型（如 fonts-noto-cjk）被偵測到
+    try:
+        fm._fmcache = None
+        fm.fontManager = fm.FontManager()
+        logger.info("🔄 Matplotlib 字體快取已強制重建")
+    except Exception as e:
+        logger.warning("⚠️ 字體快取重建失敗（%s），繼續使用現有快取", e)
 
     system = platform.system()
     candidates = _FONT_CANDIDATES.get(system, [])
 
-    # 取得系統中實際存在的字體名稱集合（只建立一次）
+    # 重建後再取得字體清單，確保讀到最新狀態
     available = _get_available_font_names()
+
+    logger.info("🖥️ 作業系統：%s，偵測到 %d 個字體", system, len(available))
+    logger.info("🔍 候選字體清單：%s", candidates)
 
     for font_name in candidates:
         if font_name in available:
@@ -86,6 +94,7 @@ def ensure_chinese_font() -> str:
         system, _FALLBACK_FONT,
     )
     return _FALLBACK_FONT
+
 
 
 
