@@ -40,15 +40,45 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class WeatherThresholds:
-    """氣象風險閾值（集中管理，方便調整）"""
-    high_wind_speed_kts: float = 20.0
-    high_gust_speed_kts: float = 35.0
-    extreme_gust_kts:    float = 50.0
-    high_wave_sig_m:     float = 2.5
-    very_high_wave_sig_m: float = 4.0
-    moderate_wave_sig_m: float = 1.5
-    night_start_hour:    int = 20
-    night_end_hour:      int = 6
+    """
+    氣象風險閾值（與 n8n_weather_monitor.py RISK_THRESHOLDS 及
+    ui_components._GUST/WIND/WAVE_THR 完全統一）
+
+    持續風速 : wind_caution=22 / wind_warning=28 / wind_danger=34  kts
+    陣風     : gust_caution=28 / gust_warning=34 / gust_danger=41 / gust_extreme=48 kts
+    浪高     : wave_moderate=1.5 / wave_caution=2.5 / wave_warning=3.5 / wave_danger=4.0 m
+    """
+    # 持續風速（sustained wind）─────────────────────────────────
+    wind_caution_kts:  float = 22.0   # Bft 6  — 開始警戒
+    wind_warning_kts:  float = 28.0   # Bft 7  — 建議加強纜繩
+    wind_danger_kts:   float = 34.0   # Bft 8  — 靠離泊高度警戒
+
+    # 陣風（gust）──────────────────────────────────────────────
+    gust_caution_kts:  float = 28.0   # ≈ Bft 7 陣風
+    gust_warning_kts:  float = 34.0   # ≈ Bft 8 陣風
+    gust_danger_kts:   float = 41.0   # ≈ Bft 9 陣風（暴風等級）
+    gust_extreme_kts:  float = 48.0   # ≈ Bft 10 陣風（極端危險）
+
+    # 浪高（significant wave height）───────────────────────────
+    wave_moderate_m:   float = 1.5    # 輕度警戒
+    wave_caution_m:    float = 2.5    # 中度警戒
+    wave_warning_m:    float = 3.5    # 高度警戒
+    wave_danger_m:     float = 4.0    # 極度危險
+
+    # 夜間作業判斷──────────────────────────────────────────────
+    night_start_hour:  int = 20
+    night_end_hour:    int = 6
+
+    # ── 向下相容欄位（舊程式碼別名，值與新欄位同步）──────────
+    # 這些欄位名稱在 _calc_risk_score / _check_window_risk 等處沿用
+    high_wind_speed_kts:  float = 22.0   # = wind_caution_kts
+    moderate_gust_kts:    float = 28.0   # = gust_caution_kts
+    high_gust_speed_kts:  float = 34.0   # = gust_warning_kts
+    very_high_gust_kts:   float = 41.0   # = gust_danger_kts
+    extreme_gust_kts:     float = 48.0   # = gust_extreme_kts
+    high_wave_sig_m:      float = 2.5    # = wave_caution_m
+    very_high_wave_sig_m: float = 4.0    # = wave_danger_m
+    moderate_wave_sig_m:  float = 1.5    # = wave_moderate_m
 
 
 @dataclass(frozen=True)
@@ -63,12 +93,14 @@ class MooringEfficiency:
 @dataclass(frozen=True)
 class RiskScoreWeights:
     """風險分數各項權重上限"""
-    wind:        int = 40
-    wave:        int = 30
-    safety_factor: int = 20
-    time_window: int = 10   # 靠/離泊時窗各 5 分
-    night_ops:   int = 5
-    port_level:  int = 5
+    wind_gust:     int = 40   # 最大陣風等級
+    wind_speed:    int = 8    # 持續風速加分
+    wind_duration: int = 18   # 高風持續時間（在港期間）
+    wave:          int = 15
+    safety_factor: int = 10
+    time_window:   int = 10   # 靠/離泊時窗各 5 分
+    night_ops:     int = 5
+    port_level:    int = 5
 
 
 # 模組層級共用常數實例
@@ -76,18 +108,20 @@ THRESHOLDS    = WeatherThresholds()
 MOORING_EFF   = MooringEfficiency()
 SCORE_WEIGHTS = RiskScoreWeights()
 
-# 港口風險等級 → 所需安全係數
+# 港口風險等級 → 最低可接受安全係數（total_restraint / wind_load）
+# MEG4 鋼纜：WLL = 55% MBL → SF_line = 1.82；合成纜：50% → SF_line = 2.0
+# 本表為系統安全係數（纜繩+拖船 vs 最大風力），依港口暴露程度分三級
 _PORT_RISK_SF_MAP: List[Tuple[int, float]] = [
-    (3,  1.5),
-    (6,  1.7),
-    (10, 2.0),
+    (3,  1.7),   # 遮蔽港 / 低暴露  (port_risk_level 1–3)
+    (6,  2.0),   # 一般商業港      (port_risk_level 4–6)  ← MEG4 合成纜標準
+    (10, 2.5),   # 高暴露 / 開放港 (port_risk_level 7–10)
 ]
 
-# 風險分數 → 風險等級
+# 風險分數 → 風險等級（與 app_config.RISK_LEVEL_SPECS 的 score_min 保持一致）
 _RISK_SCORE_LEVELS: List[Tuple[int, str]] = [
-    (70, "extreme"),
+    (75, "extreme"),
     (50, "high"),
-    (30, "medium"),
+    (25, "medium"),
     (0,  "low"),
 ]
 
@@ -460,7 +494,7 @@ class WeatherAnalyzer:
         )
 
         # ── 風險分數與等級 ──
-        risk_score = self._calc_risk_score(worst, sf, is_safe, arr_window, dep_window, vessel)
+        risk_score = self._calc_risk_score(worst, sf, is_safe, arr_window, dep_window, vessel, in_port)
         risk_level = self._score_to_level(risk_score)
 
         # ── 組裝結果 ──
@@ -537,9 +571,11 @@ class WeatherAnalyzer:
     def _calc_mooring_restraint(vessel: VesselInfo) -> MooringRestraintResult:
         """
         計算纜繩抗力。
-        WLL = MBL / safety_factor，再乘以各方向效率係數。
+        WLL = MBL × safety_factor（0.33 → WLL = MBL/3，等效傳統 SF=3.0）。
+        MEG4 建議鋼纜 WLL ≤ 55% MBL（SF≈1.82），合成纜 WLL ≤ 50%（SF=2.0）。
+        本系統預設 safety_factor=0.33（WLL=33% MBL，SF=3.0），較 MEG4 更保守。
         """
-        wll_N = vessel.mbl / vessel.safety_factor
+        wll_N = vessel.mbl * vessel.safety_factor   # N；MBL 已轉換為 N 存入 VesselInfo
 
         head_count   = vessel.bow_lines + vessel.stern_lines
         spring_count = vessel.bow_spring_lines + vessel.stern_spring_lines
@@ -600,10 +636,11 @@ class WeatherAnalyzer:
         return h >= s or h < e if s > e else s <= h < e
 
     def _is_high_risk_weather(self, r: WeatherRecord) -> bool:
+        """Bft 8 陣風（≥34 kts）、持續風≥28 kts、或浪高≥2.5m 視為高風險時刻"""
         return (
-            r.wind_speed  >= THRESHOLDS.high_wind_speed_kts
-            or r.wind_gust >= THRESHOLDS.high_gust_speed_kts
-            or r.wave_height >= THRESHOLDS.high_wave_sig_m
+            r.wind_speed  >= THRESHOLDS.wind_warning_kts    # ≥28 kts sustained
+            or r.wind_gust >= THRESHOLDS.gust_warning_kts   # ≥34 kts gust (Bft 8)
+            or r.wave_height >= THRESHOLDS.wave_caution_m   # ≥2.5m
         )
 
     def _check_window_risk(
@@ -624,9 +661,9 @@ class WeatherAnalyzer:
         max_wave     = max(r.wave_height for r in window)
         max_period   = max(r.wave_period for r in window)
 
-        if max_gust >= THRESHOLDS.high_gust_speed_kts:
+        if max_gust >= THRESHOLDS.gust_warning_kts:    # ≥34 kts (Bft 8)
             risks.append(f"前後{window_hours}H內有強陣風 ({max_gust:.1f} kts)")
-        if max_wave >= THRESHOLDS.high_wave_sig_m:
+        if max_wave >= THRESHOLDS.wave_caution_m:       # ≥2.5m
             risks.append(f"前後{window_hours}H內有大浪 ({max_wave:.1f} m)")
 
         high_risk_hours = sum(1 for r in window if self._is_high_risk_weather(r))
@@ -710,40 +747,81 @@ class WeatherAnalyzer:
         arr_window: RiskWindowResult,
         dep_window: RiskWindowResult,
         vessel: VesselInfo,
+        in_port: Optional[List[WeatherRecord]] = None,
     ) -> float:
         score = 0.0
+        in_port = in_port or []
 
-        # 風速風險（0–40 分）
-        if worst.wind_gust >= THRESHOLDS.extreme_gust_kts:
-            score += SCORE_WEIGHTS.wind
-        elif worst.wind_gust >= THRESHOLDS.high_gust_speed_kts:
-            score += 25
-        elif worst.wind_gust >= THRESHOLDS.high_wind_speed_kts:
-            score += 15
+        # ── 陣風等級（0–40 分）─────────────────────────────────
+        # 對應 n8n: gust_caution=28 / gust_warning=34 / gust_danger=41 / gust_extreme=48
+        g = worst.wind_gust
+        if g >= THRESHOLDS.gust_extreme_kts:           # ≥48 kts  Bft 10+
+            score += SCORE_WEIGHTS.wind_gust           # 40
+        elif g >= THRESHOLDS.gust_danger_kts:          # ≥41 kts  Bft 9
+            score += 33
+        elif g >= THRESHOLDS.gust_warning_kts:         # ≥34 kts  Bft 8
+            score += 24
+        elif g >= THRESHOLDS.gust_caution_kts:         # ≥28 kts  Bft 7
+            score += 12
+        elif g >= THRESHOLDS.wind_caution_kts:         # ≥22 kts  Bft 6
+            score += 5
 
-        # 浪高風險（0–30 分）
-        if worst.wave_height >= THRESHOLDS.very_high_wave_sig_m:
-            score += SCORE_WEIGHTS.wave
-        elif worst.wave_height >= THRESHOLDS.high_wave_sig_m:
-            score += 20
-        elif worst.wave_height >= THRESHOLDS.moderate_wave_sig_m:
-            score += 10
+        # ── 持續風速加分（0–8 分）────────────────────────────
+        # 對應 n8n: wind_caution=22 / wind_warning=28 / wind_danger=34
+        ws = worst.wind_speed
+        if ws >= THRESHOLDS.wind_danger_kts:           # ≥34 kts
+            score += SCORE_WEIGHTS.wind_speed          # 8
+        elif ws >= THRESHOLDS.wind_warning_kts:        # ≥28 kts
+            score += 5
+        elif ws >= THRESHOLDS.wind_caution_kts:        # ≥22 kts
+            score += 2
 
-        # 安全係數風險（0–20 分）
+        # ── 高風持續時間（0–18 分）─────────────────────────────
+        # 統計在港期間陣風 ≥ gust_caution(28 kts) 的小時數
+        high_gust_hours = sum(
+            1 for r in in_port if r.wind_gust >= THRESHOLDS.gust_caution_kts
+        )
+        if high_gust_hours >= 12:
+            score += SCORE_WEIGHTS.wind_duration       # 18
+        elif high_gust_hours >= 6:
+            score += 13
+        elif high_gust_hours >= 3:
+            score += 7
+        elif high_gust_hours >= 1:
+            score += 3
+
+        # ── 浪高風險（0–15 分）─────────────────────────────────
+        # 四級對應 n8n: wave_caution=2.5 / wave_warning=3.5 / wave_danger=4.0 m
+        wh = worst.wave_height
+        if wh >= THRESHOLDS.wave_danger_m:             # ≥4.0m 極度危險
+            score += SCORE_WEIGHTS.wave                # 15
+        elif wh >= THRESHOLDS.wave_warning_m:          # ≥3.5m 高度警戒
+            score += 11
+        elif wh >= THRESHOLDS.wave_caution_m:          # ≥2.5m 中度警戒
+            score += 7
+        elif wh >= THRESHOLDS.wave_moderate_m:         # ≥1.5m 輕度警戒
+            score += 3
+
+        # ── 安全係數風險（0–10 分）───────────────────────────
         if not is_safe:
-            score += SCORE_WEIGHTS.safety_factor if sf < 1.0 else 15
+            if sf < 1.0:
+                score += SCORE_WEIGHTS.safety_factor   # 10 — 纜繩直接不足
+            elif sf < 1.5:
+                score += 7
+            else:
+                score += 3
 
-        # 時間窗口風險（0–10 分）
+        # ── 時間窗口風險（0–10 分）───────────────────────────
         if arr_window.has_risk:
             score += 5
         if dep_window.has_risk:
             score += 5
 
-        # 夜間作業（0–5 分）
+        # ── 夜間作業（0–5 分）────────────────────────────────
         if self._is_night(vessel.arrival_time) or self._is_night(vessel.departure_time):
             score += SCORE_WEIGHTS.night_ops
 
-        # 港口風險加成（0–5 分）
+        # ── 港口風險加成（0–5 分）────────────────────────────
         if self.port_risk_level >= 8:
             score += SCORE_WEIGHTS.port_level
         elif self.port_risk_level >= 6:
@@ -795,14 +873,14 @@ class WeatherAnalyzer:
         if dep_window.has_risk:
             recs.append(f"🚨 離泊警示: {'; '.join(dep_window.risks)}")
 
-        # 高風險統計
+        # 高風險統計（陣風 ≥ gust_warning = 34 kts，Bft 8）
         high_wind_hours = sum(
-            1 for r in in_port if r.wind_gust >= THRESHOLDS.high_gust_speed_kts
+            1 for r in in_port if r.wind_gust >= THRESHOLDS.gust_warning_kts
         )
         if high_wind_hours > 0:
             recs.append(
                 f"⚠️ 在港期間有 {high_wind_hours} 小時陣風超過 "
-                f"{THRESHOLDS.high_gust_speed_kts:.0f} kts，請加強巡艙"
+                f"{THRESHOLDS.gust_warning_kts:.0f} kts（Bft 8），請加強巡艙"
             )
 
         return recs

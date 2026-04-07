@@ -240,7 +240,7 @@ def _compute_mooring_restraint_kN(vessel: VesselInfo) -> float:
 
     與 WeatherAnalyzer._calc_mooring_restraint 邏輯完全一致。
     """
-    wll_N        = vessel.mbl / vessel.safety_factor
+    wll_N        = vessel.mbl * vessel.safety_factor  # WLL = MBL × 0.33 → 等效 SF=3.0
     head_count   = vessel.bow_lines + vessel.stern_lines
     spring_count = vessel.bow_spring_lines + vessel.stern_spring_lines
     trans_N      = (
@@ -474,7 +474,7 @@ if st.session_state.result:
 
     with tab1:
         render_berthing_advisory(res, ves, analyzer)
-        render_detail_report(res, sidebar_data)
+        render_detail_report(res, sidebar_data, df_detail, analyzer)
 
     with tab2:
         render_chart_analysis(analyzer, ves, res, df_detail, sidebar_data)

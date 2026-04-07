@@ -903,9 +903,39 @@ class AedynLoginManager:
         opts.add_argument("--disable-gpu")
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-software-rasterizer")
+        opts.add_argument("--disable-extensions")
         if headless:
             opts.add_argument("--headless=new")
-        return webdriver.Chrome(options=opts)
+
+        # On Streamlit Cloud / Linux servers, Chromium is installed at a fixed path.
+        # Explicitly set the binary so Selenium doesn't hunt for google-chrome.
+        _CHROME_CANDIDATES = [
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+        ]
+        _DRIVER_CANDIDATES = [
+            "/usr/bin/chromedriver",
+            "/usr/lib/chromium/chromedriver",
+            "/usr/lib/chromium-browser/chromedriver",
+        ]
+        for path in _CHROME_CANDIDATES:
+            if os.path.exists(path):
+                opts.binary_location = path
+                logger.info("🌐 使用 Chromium binary：%s", path)
+                break
+
+        # Pick an explicit chromedriver path if available; otherwise let Selenium find it.
+        service = None
+        for path in _DRIVER_CANDIDATES:
+            if os.path.exists(path):
+                from selenium.webdriver.chrome.service import Service as ChromeService
+                service = ChromeService(executable_path=path)
+                logger.info("🌐 使用 chromedriver：%s", path)
+                break
+
+        return webdriver.Chrome(service=service, options=opts) if service else webdriver.Chrome(options=opts)
 
     def _execute_login(self, driver: webdriver.Chrome) -> Dict[str, Any]:
         wait = WebDriverWait(driver, 30)

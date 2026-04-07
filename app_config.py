@@ -91,9 +91,14 @@ class WindThreshold:
 
 @dataclass(frozen=True)
 class RiskThresholds:
-    """所有氣象風險閾值"""
-    wind: WindThreshold = field(default_factory=lambda: WindThreshold(25, 35, 45))
-    gust: WindThreshold = field(default_factory=lambda: WindThreshold(35, 45, 55))
+    """
+    所有氣象風險閾值 — 與 n8n_weather_monitor.py RISK_THRESHOLDS 及
+    ui_components._GUST/WIND_THR 保持一致：
+      wind : caution=22 / warning=28 / danger=34  kts
+      gust : caution=28 / warning=34 / danger=41  kts
+    """
+    wind: WindThreshold = field(default_factory=lambda: WindThreshold(22, 28, 34))
+    gust: WindThreshold = field(default_factory=lambda: WindThreshold(28, 34, 41))
 
 
 THRESHOLDS = RiskThresholds()
