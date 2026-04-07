@@ -57,12 +57,19 @@ _CJK_KEYWORDS = frozenset(
 def ensure_chinese_font() -> str:
     """
     設定 Matplotlib 中文字體。
+    根據作業系統自動選擇合適的字體，
+    優先使用繁體中文字體，失敗時退回備援字體。
+    Returns:
+        實際套用的字體名稱。
     """
-    # ✅ 新增：強制重建字體快取（雲端環境安裝字體後必須重掃）
+    # ✅ 新增這兩行：強制清除 Matplotlib 字體快取
+    # 雲端環境安裝新字型後，必須重掃才能被偵測到
     fm._load_fontmanager(try_read_cache=False)
 
     system = platform.system()
     candidates = _FONT_CANDIDATES.get(system, [])
+
+    # 取得系統中實際存在的字體名稱集合（只建立一次）
     available = _get_available_font_names()
 
     for font_name in candidates:
@@ -79,6 +86,7 @@ def ensure_chinese_font() -> str:
         system, _FALLBACK_FONT,
     )
     return _FALLBACK_FONT
+
 
 
 
@@ -130,8 +138,10 @@ def get_font_info() -> Dict[str, object]:
 
 def _apply_font(font_name: str) -> None:
     """套用字體至 Matplotlib 全域設定"""
+    # ✅ 加入 "DejaVu Sans" 作為備援，避免字體完全失效
     plt.rcParams["font.sans-serif"] = [font_name, "DejaVu Sans"]
-    plt.rcParams["axes.unicode_minus"] = False  # ✅ 避免負號變方塊
+    plt.rcParams["axes.unicode_minus"] = False
+
 
 
 def _get_available_font_names() -> frozenset:
