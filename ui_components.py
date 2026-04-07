@@ -276,8 +276,37 @@ def render_sidebar(crawler: Any) -> Dict[str, Any]:
                 help       = "已根據船型與吃水自動帶入，可直接手動覆蓋",
             )
 
-            tug_hp = st.number_input("拖船馬力 (HP)", 0, 10000, 4000, 100)
-            cd     = st.slider("風阻係數", 0.5, 1.5, 1.0, 0.05)
+            tc1, tc2 = st.columns(2)
+            tug_count = tc1.number_input("拖船數量", 0, 10, 2)
+            tug_hp    = tc2.number_input("拖船馬力 (HP)", 0, 10000, 4000, 100)
+
+            # Cd by vessel type reference
+            cd = st.slider(
+                "風阻係數 Cd",
+                min_value=0.5, max_value=1.5, value=1.0, step=0.05,
+                help=(
+                    "OCIMF MEG4 建議值（橫向 90° 受風）：\n"
+                    "• 貨櫃船（高舷側）：1.0–1.3\n"
+                    "• 散裝船 / 油輪：0.8–1.1\n"
+                    "• 滾裝船：1.1–1.3\n"
+                    "正側風（90°）時 Cd 最大；首尾向風時有效風阻面積改為甲板側面積"
+                ),
+            )
+
+        # ── 拖船建議提示（依載入氣象資料判斷）──────────────────
+        _analyzer = st.session_state.get("analyzer")
+        if _analyzer and hasattr(_analyzer, "data") and _analyzer.data:
+            _max_gust = max((r.wind_gust for r in _analyzer.data), default=0)
+            if _max_gust >= 41:
+                st.warning(
+                    f"⚠️ 氣象資料中最大陣風達 **{_max_gust:.0f} kts（Bft 9+）**，"
+                    "建議安排 **≥ 2 艘**拖船候命，靠離泊期間維持頂推。"
+                )
+            elif _max_gust >= 34:
+                st.info(
+                    f"💡 氣象資料中最大陣風達 **{_max_gust:.0f} kts（Bft 8）**，"
+                    "建議安排 **1–2 艘**拖船就位，大風時段維持船側候命。"
+                )
 
         with st.expander("🔗 纜繩配置", expanded=True):
             mbs = st.number_input("MBL (kN)", 100.0, 2000.0, 1000.0, 50.0)
@@ -313,7 +342,7 @@ def render_sidebar(crawler: Any) -> Dict[str, Any]:
         "berth_dir":  berth_dir,  "side":       side,
         "draft_b":    draft_b,    "draft_s":    draft_s,
         "area":       area,       "tug_hp":     tug_hp,
-        "cd":         cd,         "mbs":        mbs,
+        "tug_count":  tug_count,  "cd":         cd,         "mbs":        mbs,
         "bh":         bh,         "bs":         bs,
         "sh":         sh,         "ss":         ss,
         "enable_ai":  enable_ai,  "ai_mode":    ai_mode,
@@ -1040,19 +1069,25 @@ def render_detail_report(
     with st.expander("🚨 應變觸發條件清單（船長 & 值班官）"):
         st.caption("以下觸發條件應預先告知全體值班人員，並確認應變程序。")
         triggers = [
-            ("🟡 一級警戒",  "陣風 28–33 kts", "加強纜繩巡視（每 30 分鐘）；確認拖船隨時備妥"),
-            ("🟠 二級警戒",  "陣風 34–40 kts（Bft 8）", "啟動額外纜繩；通知港務；拖船移至船旁待命"),
-            ("🔴 三級警戒",  "陣風 41–47 kts（Bft 9）", "考慮提前離泊；橋樑團隊備妥；聯繫公司主管"),
-            ("⛔ 緊急離泊",  "陣風 ≥48 kts（Bft 10+）或 SF < 1.0", "立即啟動緊急離泊程序；VHF 頻道 16 通報"),
-            ("🌊 浪高警戒",  "浪高 ≥2.5 m", "評估護舷器狀況；加強艏艉纜繩；通知貨物操作暫停"),
-            ("👁️ 能見度", "能見度 < 1,000 m", "霧笛備妥；VHF 持續監聽；延遲靠/離泊作業"),
+            ("#D97706", "MEDIUM",  "Bft 7 — 陣風 28–33 kts",
+             "通知大副；增加纜繩巡視至每 30 分鐘；確認拖船隨時可動"),
+            ("#DC2626", "HIGH",    "Bft 8 — 陣風 34–40 kts",
+             "立即加固纜繩；拖船移至船旁候命；通知港務局；評估暫停貨物作業"),
+            ("#7C3AED", "EXTREME", "Bft 9 — 陣風 41–47 kts",
+             "啟動緊急預案；考慮提前離泊；聯繫公司輪管部主管；橋樑團隊備車"),
+            ("#111827", "EVACUATE","陣風 ≥48 kts (Bft 10+) 或 SF < 1.0",
+             "立即緊急離泊；VHF CH16 通報；啟動緊急事件報告"),
+            ("#0891B2", "WAVE",    "浪高 ≥2.5 m",
+             "評估護舷器狀況；加強艏艉纜繩；暫停貨物吊具操作"),
+            ("#6B7280", "VIS",     "能見度 < 1,000 m",
+             "霧笛值守；VHF CH16 持續監聽；延遲靠/離泊作業"),
         ]
-        for level, trigger, action in triggers:
+        for color, level, trigger, action in triggers:
             st.markdown(
-                f"<div style='display:grid;grid-template-columns:130px 220px 1fr;"
+                f"<div style='display:grid;grid-template-columns:100px 200px 1fr;"
                 f"gap:8px;align-items:start;padding:6px 4px;"
                 f"border-bottom:1px solid #F3F4F6;font-size:0.87em'>"
-                f"<span style='font-weight:700'>{level}</span>"
+                f"<span style='font-weight:700;color:{color}'>{level}</span>"
                 f"<span style='color:#374151'>{trigger}</span>"
                 f"<span style='color:#6B7280'>{action}</span></div>",
                 unsafe_allow_html=True,
@@ -1540,19 +1575,25 @@ def render_risk_analysis_report(
     # ══════════════════════════════════════════════════════════
     st.markdown("### I｜應變觸發條件 & 行動矩陣")
     trigger_rows = [
-        ("🟡 一級警戒", "陣風 28–33 kts", "通知大副；每 30 分鐘巡視；確認拖船 ETA"),
-        ("🟠 二級警戒", "陣風 34–40 kts（Bft 8）", "加固纜繩；拖船就位；通報港務；評估貨物作業是否暫停"),
-        ("🔴 三級警戒", "陣風 41–47 kts（Bft 9）", "啟動緊急預案；考慮提前離泊；聯繫公司主管"),
-        ("⛔ 緊急離泊", "陣風≥48 kts 或 SF<1.0", "立即啟動緊急離泊；VHF CH16 通報；填寫緊急事件報告"),
-        ("🌊 浪湧警戒", "浪高≥2.5 m 或 Swell≥3 m", "評估船體搖擺；加強繫泊；暫停所有貨物吊具操作"),
-        ("🔥 纜繩斷裂", "任何纜繩斷裂", "立即緊急備車；VHF CH16；拖船協助；視情況離泊"),
+        ("#D97706", "MEDIUM",   "Bft 7 / 陣風 28–33 kts",
+         "通知大副；纜繩巡視升至每 30 分鐘；確認拖船 ETA 及就位時間"),
+        ("#DC2626", "HIGH",     "Bft 8 / 陣風 34–40 kts",
+         "加固纜繩；拖船就位船旁；通報港務局；評估貨物作業是否暫停"),
+        ("#7C3AED", "EXTREME",  "Bft 9 / 陣風 41–47 kts",
+         "啟動緊急預案；考慮提前離泊；聯繫公司輪管部主管"),
+        ("#111827", "EVACUATE", "陣風 ≥48 kts (Bft 10+) 或 SF < 1.0",
+         "立即緊急離泊；VHF CH16 通報；填寫緊急事件報告"),
+        ("#0891B2", "WAVE",     "浪高 ≥2.5 m 或 Swell ≥3 m",
+         "評估護舷器及船體搖擺；加強繫泊；暫停貨物吊具作業"),
+        ("#374151", "LINE PART","任一纜繩斷裂",
+         "立即備車；VHF CH16 求助；拖船頂推；視情況緊急離泊"),
     ]
-    for level, trigger, action in trigger_rows:
+    for color, level, trigger, action in trigger_rows:
         st.markdown(
-            f"<div style='display:grid;grid-template-columns:130px 220px 1fr;"
+            f"<div style='display:grid;grid-template-columns:100px 210px 1fr;"
             f"gap:8px;padding:7px 4px;border-bottom:1px solid #F3F4F6;"
             f"align-items:start;font-size:0.86em'>"
-            f"<b>{level}</b>"
+            f"<b style='color:{color}'>{level}</b>"
             f"<span style='color:#374151'>{trigger}</span>"
             f"<span style='color:#6B7280'>{action}</span></div>",
             unsafe_allow_html=True,
@@ -1830,7 +1871,9 @@ def render_data_list(
 # ================= 歡迎頁面 =================
 
 def render_welcome_page() -> None:
-    """渲染初始歡迎頁面"""
+    """渲染初始歡迎頁面（中英雙語）"""
+
+    # ── 標題 ──────────────────────────────────────────────────
     st.markdown(
         """
         <div style='text-align:center;padding:32px 0 16px'>
@@ -1840,25 +1883,31 @@ def render_welcome_page() -> None:
                -webkit-background-clip:text;-webkit-text-fill-color:transparent;'>
             IWBDSS Pro
           </div>
-          <div style='font-size:1em;color:#6B7280;margin-top:4px;letter-spacing:1px;'>
+          <div style='font-size:0.95em;color:#6B7280;margin-top:4px;letter-spacing:1px;'>
             Integrated Weather &amp; Berthing Decision Support System v2.1
+          </div>
+          <div style='font-size:0.88em;color:#9CA3AF;margin-top:2px;'>
+            整合式氣象靠泊決策輔助系統
           </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    # ── 快速上手提示 ──────────────────────────────────────────
     st.markdown(
         """
         <div style='background:#F0F4FF;border-left:5px solid #3B82F6;
-             border-radius:8px;padding:14px 20px;margin-bottom:20px;color:#1E3A8A;font-size:0.95em;'>
-          👈 &nbsp;<b>To get started</b>, select a port from the left sidebar, choose a weather data source,
-          then fill in berthing parameters and click <b>Run Analysis</b>.
+             border-radius:8px;padding:14px 20px;margin-bottom:20px;color:#1E3A8A;font-size:0.93em;'>
+          👈 &nbsp;<b>To get started / 操作方式：</b>
+          在左側側邊欄選擇港口並載入氣象資料，填寫靠泊參數後點擊「🚀 開始分析」。<br>
+          <span style='opacity:0.75'>Select a port from the sidebar, load weather data, fill in berthing parameters, then click <b>Run Analysis</b>.</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    # ── 功能卡片 ──────────────────────────────────────────────
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -1866,16 +1915,17 @@ def render_welcome_page() -> None:
             """
             <div style='background:white;border-radius:12px;padding:20px;
                  box-shadow:0 2px 12px rgba(0,0,0,0.08);height:100%'>
-              <div style='font-size:1.6em;margin-bottom:8px'>🌊</div>
-              <div style='font-weight:700;color:#1E3A8A;margin-bottom:8px;font-size:1.05em'>
-                Weather Risk Analysis
+              <div style='font-size:1.6em;margin-bottom:6px'>🌊</div>
+              <div style='font-weight:700;color:#1E3A8A;font-size:1.02em'>
+                氣象風險分析<br>
+                <span style='font-size:0.82em;font-weight:400;color:#6B7280'>Weather Risk Analysis</span>
               </div>
-              <ul style='color:#4B5563;font-size:0.88em;padding-left:18px;margin:0'>
-                <li>5-tier gust scoring (Bft 6–10+)</li>
-                <li>In-port high-risk period detection</li>
-                <li>Wave height & swell assessment</li>
-                <li>Berthing / departure window check</li>
-                <li>Night operation risk penalty</li>
+              <ul style='color:#4B5563;font-size:0.85em;padding-left:18px;margin:10px 0 0'>
+                <li>陣風五級評分（Bft 6–10+）<br><span style='color:#9CA3AF'>5-tier gust scoring</span></li>
+                <li>在港高風險時段偵測<br><span style='color:#9CA3AF'>In-port hazard period detection</span></li>
+                <li>浪高 / 湧浪評估<br><span style='color:#9CA3AF'>Wave &amp; swell assessment</span></li>
+                <li>靠離泊時窗風險掃描<br><span style='color:#9CA3AF'>Berthing / departure window check</span></li>
+                <li>夜間作業風險加成<br><span style='color:#9CA3AF'>Night operation risk penalty</span></li>
               </ul>
             </div>
             """,
@@ -1887,16 +1937,17 @@ def render_welcome_page() -> None:
             """
             <div style='background:white;border-radius:12px;padding:20px;
                  box-shadow:0 2px 12px rgba(0,0,0,0.08);height:100%'>
-              <div style='font-size:1.6em;margin-bottom:8px'>⚙️</div>
-              <div style='font-weight:700;color:#1E3A8A;margin-bottom:8px;font-size:1.05em'>
-                Mooring & Tug Force
+              <div style='font-size:1.6em;margin-bottom:6px'>⚙️</div>
+              <div style='font-weight:700;color:#1E3A8A;font-size:1.02em'>
+                纜繩與拖船受力<br>
+                <span style='font-size:0.82em;font-weight:400;color:#6B7280'>Mooring &amp; Tug Force</span>
               </div>
-              <ul style='color:#4B5563;font-size:0.88em;padding-left:18px;margin:0'>
-                <li>OCIMF MEG4 compliant SF calculation</li>
-                <li>WLL = MBL × 0.33 per MEG4</li>
-                <li>Wind force: F = ½ρCdAV²</li>
-                <li>Bollard pull: 1.1 ton / 100 HP</li>
-                <li>Port-level SF threshold (Lvl 1–10)</li>
+              <ul style='color:#4B5563;font-size:0.85em;padding-left:18px;margin:10px 0 0'>
+                <li>OCIMF MEG4 安全係數計算<br><span style='color:#9CA3AF'>MEG4-compliant SF calculation</span></li>
+                <li>WLL = MBL × 0.33（MEG4 標準）<br><span style='color:#9CA3AF'>Working Load Limit per MEG4</span></li>
+                <li>風力公式：F = ½ρCdAV²<br><span style='color:#9CA3AF'>Wind force formula</span></li>
+                <li>拖船推力：1.1 ton / 100 HP<br><span style='color:#9CA3AF'>Bollard pull coefficient</span></li>
+                <li>港口等級 SF 門檻（Lvl 1–10）<br><span style='color:#9CA3AF'>Port-level SF threshold</span></li>
               </ul>
             </div>
             """,
@@ -1908,16 +1959,17 @@ def render_welcome_page() -> None:
             """
             <div style='background:white;border-radius:12px;padding:20px;
                  box-shadow:0 2px 12px rgba(0,0,0,0.08);height:100%'>
-              <div style='font-size:1.6em;margin-bottom:8px'>🤖</div>
-              <div style='font-weight:700;color:#1E3A8A;margin-bottom:8px;font-size:1.05em'>
-                AI Decision Support
+              <div style='font-size:1.6em;margin-bottom:6px'>🤖</div>
+              <div style='font-weight:700;color:#1E3A8A;font-size:1.02em'>
+                AI 決策輔助<br>
+                <span style='font-size:0.82em;font-weight:400;color:#6B7280'>AI Decision Support</span>
               </div>
-              <ul style='color:#4B5563;font-size:0.88em;padding-left:18px;margin:0'>
-                <li>Full Berthing Risk Analysis Report</li>
-                <li>Concrete mitigation steps per risk level</li>
-                <li>Management & captain dual-perspective</li>
-                <li>OCIMF compliance checklist</li>
-                <li>Contingency trigger matrix</li>
+              <ul style='color:#4B5563;font-size:0.85em;padding-left:18px;margin:10px 0 0'>
+                <li>完整靠泊風險分析書<br><span style='color:#9CA3AF'>Full Berthing Risk Analysis Report</span></li>
+                <li>各風險等級具體舒緩措施<br><span style='color:#9CA3AF'>Concrete mitigation steps</span></li>
+                <li>公司主管 &amp; 船長雙視角<br><span style='color:#9CA3AF'>Management &amp; captain dual-view</span></li>
+                <li>OCIMF 合規查核清單<br><span style='color:#9CA3AF'>OCIMF compliance checklist</span></li>
+                <li>應變觸發矩陣<br><span style='color:#9CA3AF'>Contingency trigger matrix</span></li>
               </ul>
             </div>
             """,
@@ -1926,33 +1978,34 @@ def render_welcome_page() -> None:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
+    # ── 風險等級對照 ──────────────────────────────────────────
     st.markdown(
         """
         <div style='background:linear-gradient(135deg,#1E3A8A 0%,#4C1D95 100%);
              border-radius:12px;padding:20px 28px;color:white;margin-top:8px'>
-          <div style='font-weight:700;font-size:1.05em;margin-bottom:12px;letter-spacing:1px'>
-            RISK LEVEL REFERENCE
+          <div style='font-weight:700;font-size:1em;margin-bottom:12px;letter-spacing:1px'>
+            風險等級對照 / RISK LEVEL REFERENCE
           </div>
-          <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px;font-size:0.85em;text-align:center'>
+          <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px;font-size:0.84em;text-align:center'>
             <div style='background:rgba(255,255,255,0.12);border-radius:8px;padding:10px'>
-              <div style='font-weight:700;color:#86EFAC'>LOW</div>
-              <div style='opacity:0.85;margin-top:4px'>Score &lt; 25</div>
-              <div style='opacity:0.7;font-size:0.85em'>Normal operations</div>
+              <div style='font-weight:700;color:#86EFAC'>LOW 低風險</div>
+              <div style='opacity:0.85;margin-top:4px'>評分 &lt; 25</div>
+              <div style='opacity:0.7;font-size:0.85em'>正常作業 / Normal ops</div>
             </div>
             <div style='background:rgba(255,255,255,0.12);border-radius:8px;padding:10px'>
-              <div style='font-weight:700;color:#FDE68A'>MEDIUM</div>
-              <div style='opacity:0.85;margin-top:4px'>Score 25–49</div>
-              <div style='opacity:0.7;font-size:0.85em'>Enhanced monitoring</div>
+              <div style='font-weight:700;color:#FDE68A'>MEDIUM 中風險</div>
+              <div style='opacity:0.85;margin-top:4px'>評分 25–49</div>
+              <div style='opacity:0.7;font-size:0.85em'>強化監視 / Enhanced watch</div>
             </div>
             <div style='background:rgba(255,255,255,0.12);border-radius:8px;padding:10px'>
-              <div style='font-weight:700;color:#FCA5A5'>HIGH</div>
-              <div style='opacity:0.85;margin-top:4px'>Score 50–74</div>
-              <div style='opacity:0.7;font-size:0.85em'>Mitigation required</div>
+              <div style='font-weight:700;color:#FCA5A5'>HIGH 高風險</div>
+              <div style='opacity:0.85;margin-top:4px'>評分 50–74</div>
+              <div style='opacity:0.7;font-size:0.85em'>採取舒緩 / Mitigation req.</div>
             </div>
             <div style='background:rgba(255,255,255,0.12);border-radius:8px;padding:10px'>
-              <div style='font-weight:700;color:#F87171'>EXTREME</div>
-              <div style='opacity:0.85;margin-top:4px'>Score ≥ 75</div>
-              <div style='opacity:0.7;font-size:0.85em'>Consider postponing</div>
+              <div style='font-weight:700;color:#F87171'>EXTREME 極高風險</div>
+              <div style='opacity:0.85;margin-top:4px'>評分 ≥ 75</div>
+              <div style='opacity:0.7;font-size:0.85em'>考慮延後 / Consider abort</div>
             </div>
           </div>
         </div>
@@ -1964,51 +2017,47 @@ def render_welcome_page() -> None:
 
     # ── 操作說明 ─────────────────────────────────────────────
     st.markdown(
-        "<div style='font-weight:700;font-size:1.1em;color:#1E3A8A;"
-        "letter-spacing:1px;margin-bottom:14px'>📖 HOW TO USE</div>",
+        "<div style='font-weight:700;font-size:1.08em;color:#1E3A8A;"
+        "letter-spacing:1px;margin-bottom:14px'>📖 操作步驟 / HOW TO USE</div>",
         unsafe_allow_html=True,
     )
 
     steps_guide = [
         (
             "1", "#3B82F6",
-            "Select a Port",
-            "In the left sidebar under <b>1. 選擇港口</b>, pick the destination port from the dropdown. "
-            "The system will automatically load its geographic coordinates and weather station ID.",
+            "選擇港口 / Select a Port",
+            "在左側「<b>1. 選擇港口</b>」下拉選單選取目的港，系統自動帶入港口座標與氣象站資訊。<br>"
+            "<span style='color:#9CA3AF'>Pick the destination port from the dropdown. Coordinates and station ID load automatically.</span>",
         ),
         (
             "2", "#8B5CF6",
-            "Load Weather Data",
-            "Click the <b>🔄</b> refresh button to fetch live forecast data from WNI, "
-            "or upload a pre-downloaded CSV file. A green banner confirms data is ready.",
+            "載入氣象資料 / Load Weather Data",
+            "點擊 <b>🔄</b> 按鈕從 WNI 即時抓取預報，或上傳已下載的 CSV 檔案，出現綠色確認橫幅即表示資料就緒。<br>"
+            "<span style='color:#9CA3AF'>Click 🔄 to fetch live WNI data, or upload a CSV file. A green banner confirms success.</span>",
         ),
         (
             "3", "#059669",
-            "Configure Berthing Parameters",
-            "Under <b>2. 參數設定</b>, enter ETA / ETD, berth heading (0–360°), alongside side, "
-            "and expand <b>⚓ 船舶細節</b> to fill in vessel dimensions, MBL, line counts, tug count and HP.",
+            "設定靠泊參數 / Configure Parameters",
+            "在「<b>2. 參數設定</b>」填入 ETA / ETD、泊位方向、靠泊舷，展開「<b>⚓ 船舶細節</b>」輸入船型、受風面積、MBL、纜繩配置及拖船數量馬力。<br>"
+            "<span style='color:#9CA3AF'>Enter ETA/ETD, berth heading, alongside side, then expand vessel details to fill dimensions, MBL, line counts and tug data.</span>",
         ),
         (
             "4", "#D97706",
-            "Run Analysis",
-            "Click <b>🔍 開始分析</b>. The engine calculates wind force (F = ½ρCdAV²), "
-            "mooring restraint (WLL = MBL × 0.33), safety factor, and a composite risk score "
-            "across five weighted categories.",
+            "執行分析 / Run Analysis",
+            "點擊「<b>🚀 開始分析</b>」，系統以 F = ½ρCdAV² 計算風力，WLL = MBL × 0.33 計算纜繩工作負荷，並產出五類加權風險評分。<br>"
+            "<span style='color:#9CA3AF'>Click Run Analysis. The engine applies F = ½ρCdAV², WLL = MBL × 0.33, and calculates a weighted composite risk score.</span>",
         ),
         (
             "5", "#DC2626",
-            "Review Results",
-            "Four tabs appear: <b>港口資訊</b> (KPI dashboard + compliance), "
-            "<b>詳細報告</b> (force mechanics, mooring/tug, weather threats), "
-            "<b>AI 分析</b> (Berthing Risk Analysis Report + AI advisory), "
-            "and <b>資料列表</b> (raw hourly data).",
+            "檢視結果 / Review Results",
+            "結果分四個索引頁呈現：<b>港口資訊</b>（KPI + 合規）、<b>詳細報告</b>（受力機制、纜繩拖船）、<b>AI 分析</b>（分析書 + AI 諮詢）、<b>資料列表</b>（逐時原始資料）。<br>"
+            "<span style='color:#9CA3AF'>Four tabs: Port Info (KPI/compliance), Detail Report (forces, mooring), AI Analysis (report + advisory), Data List (raw data).</span>",
         ),
         (
             "6", "#0891B2",
-            "Act on Recommendations",
-            "Each risk level triggers specific mitigation steps — add mooring lines, arrange standby tugs, "
-            "notify port authority, or consider postponing the call. "
-            "The contingency matrix in the AI tab lists go/no-go triggers for immediate action.",
+            "執行舒緩措施 / Act on Recommendations",
+            "各風險等級對應具體措施：增加纜繩、安排拖船候命、通知港務機關，或評估延後靠泊。應變觸發矩陣列於 AI 分析頁，供即時決策參考。<br>"
+            "<span style='color:#9CA3AF'>Each risk level triggers specific actions — add lines, arrange tugs, notify port authority, or consider postponing the call.</span>",
         ),
     ]
 
@@ -2026,49 +2075,59 @@ def render_welcome_page() -> None:
                 f"<div style='background:{color};color:white;border-radius:50%;width:26px;height:26px;"
                 f"display:flex;align-items:center;justify-content:center;"
                 f"font-weight:700;font-size:0.85em;flex-shrink:0'>{num}</div>"
-                f"<div style='font-weight:700;color:#111827;font-size:0.95em'>{title}</div>"
+                f"<div style='font-weight:700;color:#111827;font-size:0.92em'>{title}</div>"
                 f"</div>"
-                f"<div style='color:#4B5563;font-size:0.85em;line-height:1.6'>{desc}</div>"
+                f"<div style='color:#4B5563;font-size:0.83em;line-height:1.7'>{desc}</div>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
 
-    # ── 資料欄位說明 ─────────────────────────────────────────
+    # ── 參數說明表 ───────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
-    with st.expander("📋 Input Parameter Reference", expanded=False):
+    with st.expander("📋 輸入參數說明 / Input Parameter Reference", expanded=False):
         st.markdown("""
-| Parameter | Unit | Notes |
+| 參數 Parameter | 單位 Unit | 說明 Notes |
 |---|---|---|
-| ETA / ETD | Date + Time | Berthing and departure datetime |
-| Berth Heading | ° (0–360) | True bearing of the berth face |
-| Alongside Side | Port / Stbd | Which side faces the berth |
-| LOA | m | Length overall |
-| Beam | m | Moulded breadth |
-| Windage Area | m² | Lateral projected area above waterline |
-| Draft Fwd / Aft | m | Forward and aft draught |
-| MBL | kN | Minimum Breaking Load per mooring line |
-| Bow Lines / Springs | count | Lines at each mooring station |
-| Tug Count | count | Number of assist tugs |
-| Tug HP | HP | Bollard pull basis — 1.1 ton / 100 HP |
-| Port Risk Level | 1–10 | Required SF: Lvl 1–3 → 1.7, Lvl 4–6 → 2.0, Lvl 7–10 → 2.5 |
+| ETA / ETD | 日期+時間 Date+Time | 靠泊 / 離泊日期時間 Berthing and departure datetime |
+| 泊位方向 Berth Heading | ° (0–360) | 泊位面向真方位 True bearing of the berth face |
+| 靠泊舷 Alongside Side | 左 Port / 右 Stbd | 靠泊側 Which side faces the berth |
+| LOA | m | 船舶全長 Length overall |
+| 船寬 Beam | m | 型寬 Moulded breadth |
+| 受風面積 Windage Area | m² | 水線以上側向投影面積 Lateral projected area above waterline |
+| 吃水艏/艉 Draft Fwd/Aft | m | 前後吃水 Forward and aft draught |
+| MBL | kN | 每條纜繩最低破斷負荷 Min. breaking load per line |
+| 艏尾纜 / 倒纜 Lines / Springs | 條 count | 各段纜繩數量 Lines at each mooring station |
+| 拖船數量 Tug Count | 艘 count | 協助作業拖船艘數 Number of assist tugs |
+| 拖船馬力 Tug HP | HP | 推力基準 1.1 ton / 100 HP Bollard pull coefficient |
+| 港口風險等級 Port Risk Level | 1–10 | SF 門檻：Lvl 1–3→1.7，Lvl 4–6→2.0，Lvl 7–10→2.5 |
+| 風阻係數 Cd | — | 貨櫃船 1.0–1.3 ｜ 油散輪 0.8–1.1 ｜ 滾裝船 1.1–1.3 |
 """)
 
-    # ── 重要注意事項 ─────────────────────────────────────────
+    # ── 注意事項 ─────────────────────────────────────────────
     st.markdown(
         """
         <div style='background:#FFF7ED;border:1px solid #FED7AA;border-radius:10px;
              padding:16px 20px;margin-top:8px'>
-          <div style='font-weight:700;color:#92400E;margin-bottom:8px;font-size:0.95em'>
-            ⚠️ Important Notices
+          <div style='font-weight:700;color:#92400E;margin-bottom:10px;font-size:0.95em'>
+            ⚠️ 重要說明 / Important Notices
           </div>
-          <ul style='color:#78350F;font-size:0.85em;margin:0;padding-left:18px;line-height:1.8'>
-            <li>This system is a <b>decision support tool</b>. Final go/no-go authority rests with
-                the Master and Pilot in accordance with COLREGS and port authority regulations.</li>
-            <li>Weather forecasts carry inherent uncertainty. Always cross-reference with official
-                port meteorological broadcasts (NAVTEX / port VHF) before committing to a berth.</li>
-            <li>Safety factor calculations follow <b>OCIMF MEG4</b> guidelines.
-                Local port regulations may impose stricter limits — verify with the port authority.</li>
-            <li>For ports where live weather fetch is unavailable, upload a WNI CSV file directly.</li>
+          <ul style='color:#78350F;font-size:0.84em;margin:0;padding-left:18px;line-height:1.9'>
+            <li>
+              本系統為<b>決策輔助工具</b>，最終靠離泊決策權由船長與引航員依 COLREGS 及港口規定行使。<br>
+              <span style='opacity:0.75'>This system is a <b>decision support tool</b>. Final go/no-go authority rests with the Master and Pilot per COLREGS and port authority regulations.</span>
+            </li>
+            <li>
+              氣象預報具有不確定性，請務必交叉參考 NAVTEX 及港口 VHF 官方氣象廣播。<br>
+              <span style='opacity:0.75'>Always cross-reference with official port meteorological broadcasts (NAVTEX / port VHF) before committing to a berth.</span>
+            </li>
+            <li>
+              安全係數依 <b>OCIMF MEG4</b> 標準計算，各港口可能訂有更嚴格規定，應向港務局確認。<br>
+              <span style='opacity:0.75'>SF calculations follow OCIMF MEG4. Local port regulations may impose stricter limits — verify with the port authority.</span>
+            </li>
+            <li>
+              無法即時抓取氣象時，可直接上傳 WNI CSV 檔案進行離線分析。<br>
+              <span style='opacity:0.75'>For ports where live weather fetch is unavailable, upload a WNI CSV file directly for offline analysis.</span>
+            </li>
           </ul>
         </div>
         """,

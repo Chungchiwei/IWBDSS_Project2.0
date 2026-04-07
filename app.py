@@ -329,6 +329,7 @@ def _build_vessel(sidebar_data: dict) -> VesselInfo:
         stern_spring_lines = sidebar_data["ss"],
         wind_area          = sidebar_data["area"],
         wind_drag_coef     = sidebar_data.get("cd", 1.0),
+        tug_count          = int(sidebar_data.get("tug_count", 2)),
     )
 
 
@@ -489,7 +490,7 @@ if st.session_state.result:
     with tab4:
         render_data_list(df_detail, analyzer, sidebar_data)
 
-elif not st.session_state.analyzer:
+elif not st.session_state.result:
     render_welcome_page()
 
 
