@@ -372,12 +372,11 @@ def render_port_info(
         name       = getattr(port_info, "port_name",  None) or (port_info.get("port_name",  "") if isinstance(port_info, dict) else "")
         code       = getattr(port_info, "port_code",  None) or (port_info.get("port_code",  "") if isinstance(port_info, dict) else "")
         country    = getattr(port_info, "country",    None) or (port_info.get("country",    "") if isinstance(port_info, dict) else "")
-        station_id = getattr(port_info, "station_id", None) or (port_info.get("station_id", "") if isinstance(port_info, dict) else "")
         lat_ns     = getattr(port_info, "lat_ns",     None) or (port_info.get("lat_ns",     "") if isinstance(port_info, dict) else "")
         lon_ew     = getattr(port_info, "lon_ew",     None) or (port_info.get("lon_ew",     "") if isinstance(port_info, dict) else "")
     else:
         name       = getattr(analyzer, "port_name", "Unknown Port") if analyzer else "Unknown Port"
-        code = country = station_id = lat_ns = lon_ew = ""
+        code = country = lat_ns = lon_ew = ""
 
     # ── 港口名稱大標題 ────────────────────────────────────────
     st.markdown(
@@ -393,24 +392,25 @@ def render_port_info(
         return
 
     # ── 主資訊列 ─────────────────────────────────────────────
+    coord_str = f"{lat_ns} / {lon_ew}" if lat_ns and lon_ew else "N/A"
     items = [
-        ("Port Code",    code,       country),
-        ("Station ID",   station_id, "WNI Weather Station"),
-        ("Coordinates",  f"{lat_ns}", f"{lon_ew}"),
+        ("Port Code", code,       country.upper() if country else ""),
+        ("Coordinates", coord_str, "Lat / Lon"),
     ]
     cols_html = "".join(
-        f"<div style='text-align:center;padding:8px 0;border-right:1px solid rgba(255,255,255,0.2)'>"
+        f"<div style='text-align:center;padding:10px 0;"
+        f"{'border-right:1px solid rgba(255,255,255,0.2)' if i == 0 else ''}'>"
         f"<div style='font-size:0.72em;letter-spacing:1.5px;opacity:0.75;text-transform:uppercase'>{label}</div>"
-        f"<div style='font-size:1.15em;font-weight:700;margin:3px 0'>{val}</div>"
+        f"<div style='font-size:1.2em;font-weight:700;margin:4px 0'>{val}</div>"
         f"<div style='font-size:0.75em;opacity:0.7'>{sub}</div>"
         f"</div>"
-        for label, val, sub in items
+        for i, (label, val, sub) in enumerate(items)
     )
     st.markdown(
         f"<div style='background:linear-gradient(135deg,#1E3A8A 0%,#4C1D95 60%,#7C3AED 100%);"
-        f"padding:18px 24px;border-radius:14px;margin:6px 0 14px;color:white;"
+        f"padding:20px 32px;border-radius:14px;margin:6px 0 14px;color:white;"
         f"box-shadow:0 4px 20px rgba(79,70,229,0.35);'>"
-        f"<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:0'>"
+        f"<div style='display:grid;grid-template-columns:repeat(2,1fr);gap:0'>"
         f"{cols_html}"
         f"</div></div>",
         unsafe_allow_html=True,
@@ -1236,21 +1236,27 @@ def render_risk_analysis_report(
     b5.metric("在港時長", f"{stay_hrs:.1f} h",
               f"{int(stay_hrs)}h {int((stay_hrs%1)*60)}m", delta_color="off")
 
-    # 合規快覽
+    # 合規快覽 — each item: (label, status) where status is "ok"/"warn"/"fail"
+    gust_status = "ok" if rec_gust < 34 else ("warn" if rec_gust < 41 else "fail")
     comp_items = [
-        ("OCIMF MEG4 安全係數 ≥1.7", sf >= 1.7),
-        ("纜繩配置充足", mooring_ok),
-        ("拖船推力充足", tug_ok),
-        ("陣風未超 Bft 8 作業上限（34 kts）", rec_gust < 34),
+        ("OCIMF MEG4 SF ≥ 1.7",        "ok"   if sf >= 1.7  else "fail"),
+        ("Mooring lines adequate",       "ok"   if mooring_ok else "warn"),
+        ("Tug support adequate",         "ok"   if tug_ok     else "warn"),
+        (f"Gust within Bft 8 limit\n({rec_gust:.0f} kts)", gust_status),
     ]
+    _STATUS_STYLE = {
+        "ok":   ("#ECFDF5", "#BBF7D0", "✅"),
+        "warn": ("#FFFBEB", "#FDE68A", "⚠️"),
+        "fail": ("#FEF2F2", "#FECACA", "❌"),
+    }
     cols_c = st.columns(len(comp_items))
-    for col, (label, ok) in zip(cols_c, comp_items):
+    for col, (label, status) in zip(cols_c, comp_items):
+        bg, border, icon = _STATUS_STYLE[status]
         col.markdown(
-            f"<div style='background:{'#ECFDF5' if ok else '#FEF2F2'};"
-            f"border-radius:6px;padding:8px 10px;text-align:center;"
-            f"border:1px solid {'#BBF7D0' if ok else '#FECACA'}'>"
-            f"<div style='font-size:1.3em'>{'✅' if ok else '❌'}</div>"
-            f"<div style='font-size:0.75em;color:#374151;margin-top:2px'>{label}</div>"
+            f"<div style='background:{bg};border-radius:6px;padding:8px 10px;text-align:center;"
+            f"border:1px solid {border}'>"
+            f"<div style='font-size:1.3em'>{icon}</div>"
+            f"<div style='font-size:0.75em;color:#374151;margin-top:2px;white-space:pre-line'>{label}</div>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -1825,15 +1831,246 @@ def render_data_list(
 
 def render_welcome_page() -> None:
     """渲染初始歡迎頁面"""
-    st.info("👈 請在左側選擇氣象來源（上傳檔案或自動抓取）")
     st.markdown(
         """
-        ## 🚢 IWBDSS 船舶靠泊決策輔助系統
+        <div style='text-align:center;padding:32px 0 16px'>
+          <div style='font-size:3em;'>⚓</div>
+          <div style='font-size:2.2em;font-weight:800;letter-spacing:2px;
+               background:linear-gradient(90deg,#1E40AF,#7C3AED);
+               -webkit-background-clip:text;-webkit-text-fill-color:transparent;'>
+            IWBDSS Pro
+          </div>
+          <div style='font-size:1em;color:#6B7280;margin-top:4px;letter-spacing:1px;'>
+            Integrated Weather &amp; Berthing Decision Support System v2.1
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-        ### 新版功能 (v2.0)
-        - 🌙 **夜間作業偵測**：自動識別靠/離泊時段是否為夜間，並給予風險加成。
-        - 🌪️ **大風大浪警示**：自動掃描在港期間是否有超過閾值的氣象狀況。
-        - 🚨 **時窗風險檢查**：特別針對靠泊與離泊前後 2 小時進行高風險掃描。
-        - 🤖 **AI 深度分析**：整合 Perplexity AI 進行專業航海諮詢。
+    st.markdown(
         """
+        <div style='background:#F0F4FF;border-left:5px solid #3B82F6;
+             border-radius:8px;padding:14px 20px;margin-bottom:20px;color:#1E3A8A;font-size:0.95em;'>
+          👈 &nbsp;<b>To get started</b>, select a port from the left sidebar, choose a weather data source,
+          then fill in berthing parameters and click <b>Run Analysis</b>.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown(
+            """
+            <div style='background:white;border-radius:12px;padding:20px;
+                 box-shadow:0 2px 12px rgba(0,0,0,0.08);height:100%'>
+              <div style='font-size:1.6em;margin-bottom:8px'>🌊</div>
+              <div style='font-weight:700;color:#1E3A8A;margin-bottom:8px;font-size:1.05em'>
+                Weather Risk Analysis
+              </div>
+              <ul style='color:#4B5563;font-size:0.88em;padding-left:18px;margin:0'>
+                <li>5-tier gust scoring (Bft 6–10+)</li>
+                <li>In-port high-risk period detection</li>
+                <li>Wave height & swell assessment</li>
+                <li>Berthing / departure window check</li>
+                <li>Night operation risk penalty</li>
+              </ul>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col2:
+        st.markdown(
+            """
+            <div style='background:white;border-radius:12px;padding:20px;
+                 box-shadow:0 2px 12px rgba(0,0,0,0.08);height:100%'>
+              <div style='font-size:1.6em;margin-bottom:8px'>⚙️</div>
+              <div style='font-weight:700;color:#1E3A8A;margin-bottom:8px;font-size:1.05em'>
+                Mooring & Tug Force
+              </div>
+              <ul style='color:#4B5563;font-size:0.88em;padding-left:18px;margin:0'>
+                <li>OCIMF MEG4 compliant SF calculation</li>
+                <li>WLL = MBL × 0.33 per MEG4</li>
+                <li>Wind force: F = ½ρCdAV²</li>
+                <li>Bollard pull: 1.1 ton / 100 HP</li>
+                <li>Port-level SF threshold (Lvl 1–10)</li>
+              </ul>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col3:
+        st.markdown(
+            """
+            <div style='background:white;border-radius:12px;padding:20px;
+                 box-shadow:0 2px 12px rgba(0,0,0,0.08);height:100%'>
+              <div style='font-size:1.6em;margin-bottom:8px'>🤖</div>
+              <div style='font-weight:700;color:#1E3A8A;margin-bottom:8px;font-size:1.05em'>
+                AI Decision Support
+              </div>
+              <ul style='color:#4B5563;font-size:0.88em;padding-left:18px;margin:0'>
+                <li>Full Berthing Risk Analysis Report</li>
+                <li>Concrete mitigation steps per risk level</li>
+                <li>Management & captain dual-perspective</li>
+                <li>OCIMF compliance checklist</li>
+                <li>Contingency trigger matrix</li>
+              </ul>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    st.markdown(
+        """
+        <div style='background:linear-gradient(135deg,#1E3A8A 0%,#4C1D95 100%);
+             border-radius:12px;padding:20px 28px;color:white;margin-top:8px'>
+          <div style='font-weight:700;font-size:1.05em;margin-bottom:12px;letter-spacing:1px'>
+            RISK LEVEL REFERENCE
+          </div>
+          <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px;font-size:0.85em;text-align:center'>
+            <div style='background:rgba(255,255,255,0.12);border-radius:8px;padding:10px'>
+              <div style='font-weight:700;color:#86EFAC'>LOW</div>
+              <div style='opacity:0.85;margin-top:4px'>Score &lt; 25</div>
+              <div style='opacity:0.7;font-size:0.85em'>Normal operations</div>
+            </div>
+            <div style='background:rgba(255,255,255,0.12);border-radius:8px;padding:10px'>
+              <div style='font-weight:700;color:#FDE68A'>MEDIUM</div>
+              <div style='opacity:0.85;margin-top:4px'>Score 25–49</div>
+              <div style='opacity:0.7;font-size:0.85em'>Enhanced monitoring</div>
+            </div>
+            <div style='background:rgba(255,255,255,0.12);border-radius:8px;padding:10px'>
+              <div style='font-weight:700;color:#FCA5A5'>HIGH</div>
+              <div style='opacity:0.85;margin-top:4px'>Score 50–74</div>
+              <div style='opacity:0.7;font-size:0.85em'>Mitigation required</div>
+            </div>
+            <div style='background:rgba(255,255,255,0.12);border-radius:8px;padding:10px'>
+              <div style='font-weight:700;color:#F87171'>EXTREME</div>
+              <div style='opacity:0.85;margin-top:4px'>Score ≥ 75</div>
+              <div style='opacity:0.7;font-size:0.85em'>Consider postponing</div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── 操作說明 ─────────────────────────────────────────────
+    st.markdown(
+        "<div style='font-weight:700;font-size:1.1em;color:#1E3A8A;"
+        "letter-spacing:1px;margin-bottom:14px'>📖 HOW TO USE</div>",
+        unsafe_allow_html=True,
+    )
+
+    steps_guide = [
+        (
+            "1", "#3B82F6",
+            "Select a Port",
+            "In the left sidebar under <b>1. 選擇港口</b>, pick the destination port from the dropdown. "
+            "The system will automatically load its geographic coordinates and weather station ID.",
+        ),
+        (
+            "2", "#8B5CF6",
+            "Load Weather Data",
+            "Click the <b>🔄</b> refresh button to fetch live forecast data from WNI, "
+            "or upload a pre-downloaded CSV file. A green banner confirms data is ready.",
+        ),
+        (
+            "3", "#059669",
+            "Configure Berthing Parameters",
+            "Under <b>2. 參數設定</b>, enter ETA / ETD, berth heading (0–360°), alongside side, "
+            "and expand <b>⚓ 船舶細節</b> to fill in vessel dimensions, MBL, line counts, tug count and HP.",
+        ),
+        (
+            "4", "#D97706",
+            "Run Analysis",
+            "Click <b>🔍 開始分析</b>. The engine calculates wind force (F = ½ρCdAV²), "
+            "mooring restraint (WLL = MBL × 0.33), safety factor, and a composite risk score "
+            "across five weighted categories.",
+        ),
+        (
+            "5", "#DC2626",
+            "Review Results",
+            "Four tabs appear: <b>港口資訊</b> (KPI dashboard + compliance), "
+            "<b>詳細報告</b> (force mechanics, mooring/tug, weather threats), "
+            "<b>AI 分析</b> (Berthing Risk Analysis Report + AI advisory), "
+            "and <b>資料列表</b> (raw hourly data).",
+        ),
+        (
+            "6", "#0891B2",
+            "Act on Recommendations",
+            "Each risk level triggers specific mitigation steps — add mooring lines, arrange standby tugs, "
+            "notify port authority, or consider postponing the call. "
+            "The contingency matrix in the AI tab lists go/no-go triggers for immediate action.",
+        ),
+    ]
+
+    for i in range(0, len(steps_guide), 2):
+        row_cols = st.columns(2)
+        for j, col in enumerate(row_cols):
+            if i + j >= len(steps_guide):
+                break
+            num, color, title, desc = steps_guide[i + j]
+            col.markdown(
+                f"<div style='background:white;border-radius:10px;padding:16px 18px;"
+                f"box-shadow:0 2px 10px rgba(0,0,0,0.07);margin-bottom:12px;"
+                f"border-left:4px solid {color}'>"
+                f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:8px'>"
+                f"<div style='background:{color};color:white;border-radius:50%;width:26px;height:26px;"
+                f"display:flex;align-items:center;justify-content:center;"
+                f"font-weight:700;font-size:0.85em;flex-shrink:0'>{num}</div>"
+                f"<div style='font-weight:700;color:#111827;font-size:0.95em'>{title}</div>"
+                f"</div>"
+                f"<div style='color:#4B5563;font-size:0.85em;line-height:1.6'>{desc}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    # ── 資料欄位說明 ─────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("📋 Input Parameter Reference", expanded=False):
+        st.markdown("""
+| Parameter | Unit | Notes |
+|---|---|---|
+| ETA / ETD | Date + Time | Berthing and departure datetime |
+| Berth Heading | ° (0–360) | True bearing of the berth face |
+| Alongside Side | Port / Stbd | Which side faces the berth |
+| LOA | m | Length overall |
+| Beam | m | Moulded breadth |
+| Windage Area | m² | Lateral projected area above waterline |
+| Draft Fwd / Aft | m | Forward and aft draught |
+| MBL | kN | Minimum Breaking Load per mooring line |
+| Bow Lines / Springs | count | Lines at each mooring station |
+| Tug Count | count | Number of assist tugs |
+| Tug HP | HP | Bollard pull basis — 1.1 ton / 100 HP |
+| Port Risk Level | 1–10 | Required SF: Lvl 1–3 → 1.7, Lvl 4–6 → 2.0, Lvl 7–10 → 2.5 |
+""")
+
+    # ── 重要注意事項 ─────────────────────────────────────────
+    st.markdown(
+        """
+        <div style='background:#FFF7ED;border:1px solid #FED7AA;border-radius:10px;
+             padding:16px 20px;margin-top:8px'>
+          <div style='font-weight:700;color:#92400E;margin-bottom:8px;font-size:0.95em'>
+            ⚠️ Important Notices
+          </div>
+          <ul style='color:#78350F;font-size:0.85em;margin:0;padding-left:18px;line-height:1.8'>
+            <li>This system is a <b>decision support tool</b>. Final go/no-go authority rests with
+                the Master and Pilot in accordance with COLREGS and port authority regulations.</li>
+            <li>Weather forecasts carry inherent uncertainty. Always cross-reference with official
+                port meteorological broadcasts (NAVTEX / port VHF) before committing to a berth.</li>
+            <li>Safety factor calculations follow <b>OCIMF MEG4</b> guidelines.
+                Local port regulations may impose stricter limits — verify with the port authority.</li>
+            <li>For ports where live weather fetch is unavailable, upload a WNI CSV file directly.</li>
+          </ul>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )

@@ -162,8 +162,11 @@ class PlotService:
         self.analyzer = analyzer
         self.data      = analyzer.data
         raw_name = getattr(analyzer, "port_name", "Port") or "Port"
-        # Strip non-ASCII characters (Chinese) so Matplotlib can render the title
+        # Strip non-ASCII (CJK) characters so Matplotlib can render the title
         ascii_name = "".join(c for c in raw_name if ord(c) < 128).strip()
+        # Remove any trailing empty parentheses left after stripping, e.g. "PORT ()"
+        import re as _re
+        ascii_name = _re.sub(r"\s*\(\s*\)\s*$", "", ascii_name).strip()
         self._port_name: str = ascii_name if ascii_name else "Port"
 
     # ── 風速趨勢 ──────────────────────────────────────────────
