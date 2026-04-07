@@ -359,7 +359,7 @@ def render_port_info(
     port_info: Optional[PortDisplayInfo],
     analyzer: Optional[WeatherAnalyzer],
 ) -> None:
-    """渲染港口資訊卡片"""
+    """渲染港口資訊卡片（強化版）"""
     has_valid_info = (
         port_info is not None
         and (
@@ -375,36 +375,78 @@ def render_port_info(
         station_id = getattr(port_info, "station_id", None) or (port_info.get("station_id", "") if isinstance(port_info, dict) else "")
         lat_ns     = getattr(port_info, "lat_ns",     None) or (port_info.get("lat_ns",     "") if isinstance(port_info, dict) else "")
         lon_ew     = getattr(port_info, "lon_ew",     None) or (port_info.get("lon_ew",     "") if isinstance(port_info, dict) else "")
-
-        st.markdown(
-            f"<h1 style='text-align:center;color:#1f77b4;font-size:36px;'>🏝️ {name}</h1>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f"""
-            <div style='background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
-                        padding:20px;border-radius:15px;margin:10px 0;color:white;'>
-              <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:10px;text-align:center;'>
-                <div><small>Port Code</small><br><b>{code}</b><br><small>{country}</small></div>
-                <div><small>Station ID</small><br><b>{station_id}</b></div>
-                <div><small>Coordinates</small><br><b>{lat_ns} / {lon_ew}</b></div>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
     else:
-        port_name = getattr(analyzer, "port_name", "Unknown Port") if analyzer else "Unknown Port"
-        st.markdown(
-            f"<h1 style='text-align:center;font-size:36px;'>⚓ {port_name}</h1>",
-            unsafe_allow_html=True,
-        )
+        name       = getattr(analyzer, "port_name", "Unknown Port") if analyzer else "Unknown Port"
+        code = country = station_id = lat_ns = lon_ew = ""
+
+    # ── 港口名稱大標題 ────────────────────────────────────────
+    st.markdown(
+        f"<div style='text-align:center;margin:8px 0 4px'>"
+        f"<span style='font-size:2.4em;font-weight:800;letter-spacing:2px;"
+        f"background:linear-gradient(90deg,#1E40AF,#7C3AED);-webkit-background-clip:text;"
+        f"-webkit-text-fill-color:transparent;'>⚓ {name.upper()}</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    if not has_valid_info:
+        return
+
+    # ── 主資訊列 ─────────────────────────────────────────────
+    items = [
+        ("Port Code",    code,       country),
+        ("Station ID",   station_id, "WNI Weather Station"),
+        ("Coordinates",  f"{lat_ns}", f"{lon_ew}"),
+    ]
+    cols_html = "".join(
+        f"<div style='text-align:center;padding:8px 0;border-right:1px solid rgba(255,255,255,0.2)'>"
+        f"<div style='font-size:0.72em;letter-spacing:1.5px;opacity:0.75;text-transform:uppercase'>{label}</div>"
+        f"<div style='font-size:1.15em;font-weight:700;margin:3px 0'>{val}</div>"
+        f"<div style='font-size:0.75em;opacity:0.7'>{sub}</div>"
+        f"</div>"
+        for label, val, sub in items
+    )
+    st.markdown(
+        f"<div style='background:linear-gradient(135deg,#1E3A8A 0%,#4C1D95 60%,#7C3AED 100%);"
+        f"padding:18px 24px;border-radius:14px;margin:6px 0 14px;color:white;"
+        f"box-shadow:0 4px 20px rgba(79,70,229,0.35);'>"
+        f"<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:0'>"
+        f"{cols_html}"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ================= KPI 指標 =================
 
+# 各風險等級對應的具體舒緩措施
+_MITIGATION_STEPS: dict = {
+    "medium": [
+        "增加艏艉頭纜各 1 條，強化橫向抗力",
+        "確認拖船就位並處於隨時可動狀態",
+        "每小時巡視全部纜繩張力與護舷器位置",
+        "密切追蹤氣象預報，風況惡化時立即升級警戒",
+    ],
+    "high": [
+        "立即增加頭纜 / 倒纜各 1–2 條（艏艉均需加強）",
+        "安排額外拖船 1 艘於船舷待命，隨時提供側向抵抗力",
+        "每 30 分鐘巡視纜繩，記錄張力計讀數",
+        "通知港務局並回報公司輪管部，取得額外纜繩資源授權",
+        "評估提前離泊或移泊至遮蔽錨地的可行性",
+    ],
+    "extreme": [
+        "全數纜繩加倍（至少艏艉各 6 條）並確認纜樁負荷上限",
+        "立即申請增派 2 艘拖船在船側頂推，防止船體偏移",
+        "停止一切貨物作業，甲板人員縮減至最低必要值班人數",
+        "備妥緊急離泊程序：主機備車、VHF CH16 持續值守",
+        "聯繫引航站及港口主管機關，評估封港或強制離泊命令",
+        "必要時立即執行緊急離泊，駛往避風錨地",
+    ],
+}
+
+
 def render_kpi_metrics(result: AnalysisResult) -> None:
-    """渲染四格 KPI 指標列"""
+    """渲染 KPI 指標列與風險舒緩措施橫幅"""
     wfs         = result.wind_force_summary
     max_force_N = _get_wfs_value(wfs, "max_gust_force_N", "max_gust_force_N")
     sf          = _get_wfs_value(wfs, "safety_factor",    "safety_factor")
@@ -413,36 +455,42 @@ def render_kpi_metrics(result: AnalysisResult) -> None:
     delta_color = "normal" if bow_status == "OK" else "inverse"
     risk_delta  = result.risk_score - result.mitigated_risk_score
 
-    # 取出風險等級規格，用中文標籤顯示
-    risk_spec      = RISK_LEVEL_SPECS.get(result.risk_level, RISK_LEVEL_SPECS["low"])
-    risk_label     = risk_spec.label      # 例如 "🔴 極高"
-    risk_name_zh   = risk_spec.name_zh   # 例如 "極度危險"
+    risk_spec  = RISK_LEVEL_SPECS.get(result.risk_level, RISK_LEVEL_SPECS["low"])
+    risk_label = risk_spec.label
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("綜合風險評分", f"{result.risk_score:.1f} / 100", risk_label,  delta_color="inverse")
+    k1.metric("綜合風險評分", f"{result.risk_score:.1f} / 100", risk_label,         delta_color="inverse")
     k2.metric("緩解後風險",   f"{result.mitigated_risk_score:.1f}", f"降幅 {risk_delta:.1f}")
     k3.metric("最大受力",     f"{max_force_N / 1000:.0f} kN",       f"SF {sf:.2f}")
     k4.metric("繫泊狀態",     bow_status,                            delta_color=delta_color)
 
-    # 高度/極度危險時顯示醒目警示橫幅
+    # ── 風險舒緩橫幅（medium 以上才顯示）────────────────────
+    steps = _MITIGATION_STEPS.get(result.risk_level)
+    if not steps:
+        return
+
     if result.risk_level == "extreme":
-        st.markdown(
-            f"<div style='background:{risk_spec.color_bg};border-left:6px solid {risk_spec.color_hex};"
-            f"padding:12px 16px;border-radius:6px;margin-top:8px;'>"
-            f"<b style='color:{risk_spec.color_hex};font-size:16px;'>🚨 {risk_name_zh}（評分 {result.risk_score:.0f}/100）</b>"
-            f"&nbsp;—&nbsp;在港期間氣象條件嚴峻，強烈建議延後靠泊或採取額外防護措施。"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        icon, title = "🚨", f"極度危險（評分 {result.risk_score:.0f}/100）— 立即採取以下緊急措施"
     elif result.risk_level == "high":
-        st.markdown(
-            f"<div style='background:{risk_spec.color_bg};border-left:6px solid {risk_spec.color_hex};"
-            f"padding:12px 16px;border-radius:6px;margin-top:8px;'>"
-            f"<b style='color:{risk_spec.color_hex};font-size:15px;'>⚠️ {risk_name_zh}（評分 {result.risk_score:.0f}/100）</b>"
-            f"&nbsp;—&nbsp;在港期間風況偏強，請加強纜繩配置並密切監控氣象變化。"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        icon, title = "⚠️", f"高度風險（評分 {result.risk_score:.0f}/100）— 建議執行以下舒緩措施"
+    else:
+        icon, title = "📋", f"中度風險（評分 {result.risk_score:.0f}/100）— 建議採取以下預防措施"
+
+    steps_html = "".join(
+        f"<div style='display:flex;align-items:flex-start;gap:8px;margin-bottom:5px'>"
+        f"<span style='color:{risk_spec.color_hex};font-weight:700;flex-shrink:0'>▶</span>"
+        f"<span style='color:#374151;font-size:0.9em'>{s}</span></div>"
+        for s in steps
+    )
+    st.markdown(
+        f"<div style='background:{risk_spec.color_bg};border-left:6px solid {risk_spec.color_hex};"
+        f"padding:14px 18px;border-radius:8px;margin-top:10px'>"
+        f"<div style='font-weight:700;color:{risk_spec.color_hex};font-size:1em;margin-bottom:10px'>"
+        f"{icon} {title}</div>"
+        f"{steps_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ================= 靠離泊作業建議 =================

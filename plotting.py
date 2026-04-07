@@ -19,7 +19,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -83,12 +82,12 @@ def _add_vessel_markers(
     if arrival_time:
         ax.axvline(
             arrival_time, color="green", linestyle="--",
-            label="靠港時間", linewidth=1.5,
+            label="Berthing", linewidth=1.5,
         )
     if departure_time:
         ax.axvline(
             departure_time, color="red", linestyle="--",
-            label="離港時間", linewidth=1.5,
+            label="Departure", linewidth=1.5,
         )
 
 
@@ -162,12 +161,12 @@ class PlotService:
     def __init__(self, analyzer: Any) -> None:
         self.analyzer = analyzer
         self.data      = analyzer.data
-        self._port_name: str = getattr(analyzer, "port_name", "港口")
+        self._port_name: str = getattr(analyzer, "port_name", "Port")
 
     # ── 風速趨勢 ──────────────────────────────────────────────
 
     def plot_wind_trend(
-        self, vessel: Any, result: Any, figsize: Tuple[int, int] = (12, 6)
+        self, vessel: Any, _result: Any = None, figsize: Tuple[int, int] = (12, 6)
     ) -> plt.Figure:
         """繪製風速趨勢圖（含靠/離港標記與風險閾值線）"""
         times  = [w.time        for w in self.data]
@@ -175,26 +174,25 @@ class PlotService:
         gusts  = [w.wind_gust   for w in self.data]
 
         fig, ax = plt.subplots(figsize=figsize)
-        ax.plot(times, speeds, "b-",  label="平均風速", linewidth=2)
-        ax.plot(times, gusts,  "r--", label="最大陣風", linewidth=2)
+        ax.plot(times, speeds, "b-",  label="Wind Speed", linewidth=2)
+        ax.plot(times, gusts,  "r--", label="Wind Gust",  linewidth=2)
 
         _add_vessel_markers(ax, vessel.arrival_time, vessel.departure_time)
 
-        # 風險閾值線（引用 THRESHOLDS，不硬寫數值）
         ax.axhline(
             THRESHOLDS.wind.medium, color="orange", linestyle=":", alpha=0.5,
-            label=f"中風險 ({THRESHOLDS.wind.medium:.0f} kts)",
+            label=f"Warning ({THRESHOLDS.wind.medium:.0f} kts)",
         )
         ax.axhline(
             THRESHOLDS.wind.high, color="red", linestyle=":", alpha=0.5,
-            label=f"高風險 ({THRESHOLDS.wind.high:.0f} kts)",
+            label=f"Danger ({THRESHOLDS.wind.high:.0f} kts)",
         )
 
         _apply_common_ax_style(
             ax,
-            xlabel="時間",
-            ylabel="風速 (knots)",
-            title=f"{self._port_name} - 風速趨勢",
+            xlabel="Time",
+            ylabel="Wind Speed (kts)",
+            title=f"{self._port_name} - Wind Trend",
         )
         plt.tight_layout()
         return fig
@@ -202,7 +200,7 @@ class PlotService:
     # ── 浪高趨勢 ──────────────────────────────────────────────
 
     def plot_wave_trend(
-        self, vessel: Any, result: Any, figsize: Tuple[int, int] = (12, 6)
+        self, vessel: Any, _result: Any = None, figsize: Tuple[int, int] = (12, 6)
     ) -> plt.Figure:
         """繪製浪高趨勢圖（含顯著浪高與最大浪高）"""
         times        = [w.time        for w in self.data]
@@ -210,20 +208,20 @@ class PlotService:
         wave_maxs    = [w.wave_max    for w in self.data]
 
         fig, ax = plt.subplots(figsize=figsize)
-        ax.plot(times, wave_heights, "c-",  label="顯著浪高 (Hs)",  linewidth=2)
-        ax.plot(times, wave_maxs,    "m--", label="最大浪高 (Hmax)", linewidth=2)
+        ax.plot(times, wave_heights, "c-",  label="Sig. Wave Ht (Hs)",  linewidth=2)
+        ax.plot(times, wave_maxs,    "m--", label="Max Wave Ht (Hmax)",  linewidth=2)
         ax.fill_between(times, wave_heights, alpha=0.3, color="cyan")
 
         _add_vessel_markers(ax, vessel.arrival_time, vessel.departure_time)
 
-        ax.axhline(2.0, color="orange", linestyle=":", alpha=0.5, label="警戒 (2.0 m)")
-        ax.axhline(3.0, color="red",    linestyle=":", alpha=0.5, label="危險 (3.0 m)")
+        ax.axhline(2.0, color="orange", linestyle=":", alpha=0.5, label="Caution (2.0 m)")
+        ax.axhline(3.0, color="red",    linestyle=":", alpha=0.5, label="Danger (3.0 m)")
 
         _apply_common_ax_style(
             ax,
-            xlabel="時間",
-            ylabel="浪高 (m)",
-            title=f"{self._port_name} - 浪高趨勢",
+            xlabel="Time",
+            ylabel="Wave Height (m)",
+            title=f"{self._port_name} - Wave Trend",
         )
         plt.tight_layout()
         return fig
@@ -253,33 +251,31 @@ class PlotService:
             gust_forces.append(0.5 * rho * cd * area * v_gust ** 2 / 1000)
 
         fig, ax = plt.subplots(figsize=figsize)
-        ax.plot(times, avg_forces,  "g-",  label="平均風力", linewidth=2)
-        ax.plot(times, gust_forces, "r--", label="陣風力",   linewidth=2)
+        ax.plot(times, avg_forces,  "g-",  label="Avg Wind Force", linewidth=2)
+        ax.plot(times, gust_forces, "r--", label="Gust Force",     linewidth=2)
         ax.fill_between(times, avg_forces, alpha=0.3, color="green")
 
         _add_vessel_markers(ax, vessel.arrival_time, vessel.departure_time)
 
-        # 纜繩總抓力（統一由 _compute_mooring_capacity_kN 計算）
         cap_kN = _compute_mooring_capacity_kN(vessel, result)
         if cap_kN > 0:
             ax.axhline(
                 cap_kN, color="blue", linestyle="-.", linewidth=2.5,
-                label=f"纜繩總抓力 ({cap_kN:.0f} kN)",
+                label=f"Mooring Capacity ({cap_kN:.0f} kN)",
             )
 
-        # 最大風力參考線
         max_force_kN = max(gust_forces, default=0.0)
         if max_force_kN > 0:
             ax.axhline(
                 max_force_kN, color="red", linestyle=":", alpha=0.5,
-                label=f"最大風力 ({max_force_kN:.0f} kN)",
+                label=f"Max Force ({max_force_kN:.0f} kN)",
             )
 
         ax.legend(loc="upper left", bbox_to_anchor=(1, 1))
-        ax.set_xlabel("時間", fontsize=12)
-        ax.set_ylabel("風力 (kN)", fontsize=12)
+        ax.set_xlabel("Time", fontsize=12)
+        ax.set_ylabel("Force (kN)", fontsize=12)
         ax.set_title(
-            f"{self._port_name} - 風力 vs 纜繩抓力分析",
+            f"{self._port_name} - Wind Force vs Mooring Capacity",
             fontsize=14, fontweight="bold",
         )
         ax.grid(True, alpha=0.3)
@@ -313,13 +309,13 @@ def plot_enhanced_timeline(
 
         # ── 決定子圖結構 ──────────────────────────────────────
         subplot_specs: List[Tuple[str, bool]] = [
-            ("風速與陣風 (Wind)",            True),
-            ("浪高 (Wave)",                  True),
-            ("風力與抓力 (Force vs Capacity)",
+            ("Wind Speed & Gust",            True),
+            ("Wave Height",                  True),
+            ("Force vs Mooring Capacity",
              "gust_force_N" in df_plot.columns
              or "total_force_N" in df_plot.columns
              or vessel_info is not None),
-            ("安全係數 (SF)",                "safety_factor" in df_plot.columns),
+            ("Safety Factor (SF)",           "safety_factor" in df_plot.columns),
         ]
         active_specs = [(title, _) for title, show in subplot_specs for _ in [show] if show]
         num_rows     = len(active_specs)
@@ -358,9 +354,9 @@ def plot_enhanced_timeline(
         # ── 靠/離泊標記 ───────────────────────────────────────
         _add_plotly_time_markers(fig, berthing_time, departure_time)
 
-        title_text = "增強型氣象時間軸分析"
+        title_text = "Enhanced Weather Timeline"
         if berth_angle is not None:
-            title_text += f" — {berth_angle:.0f}° 泊位"
+            title_text += f" — Berth {berth_angle:.0f}°"
 
         fig.update_layout(
             height=300 * num_rows,
@@ -404,33 +400,32 @@ def _prepare_dataframe(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 
 
 def _add_wind_traces(fig: go.Figure, df: pd.DataFrame, row: int) -> None:
-    """Row：風速與陣風"""
+    """Row: Wind Speed & Gust"""
     fig.add_trace(
         go.Scatter(
             x=df["time"], y=df["wind_speed_kts"],
-            name="風速",
+            name="Wind Speed",
             line=dict(color=CHART_COLORS["wind_speed"], width=2),
             mode="lines",
-            hovertemplate="<b>風速</b>: %{y:.1f} kts<extra></extra>",
+            hovertemplate="<b>Wind Speed</b>: %{y:.1f} kts<extra></extra>",
         ),
         row=row, col=1,
     )
     fig.add_trace(
         go.Scatter(
             x=df["time"], y=df["wind_gust_kts"],
-            name="陣風",
+            name="Wind Gust",
             line=dict(color=CHART_COLORS["wind_gust"], width=2, dash="dash"),
             mode="lines",
-            hovertemplate="<b>陣風</b>: %{y:.1f} kts<extra></extra>",
+            hovertemplate="<b>Wind Gust</b>: %{y:.1f} kts<extra></extra>",
         ),
         row=row, col=1,
     )
 
-    # 風險閾值線（引用 THRESHOLDS）
     for val, label, color_key in [
-        (THRESHOLDS.wind.medium,  "中風險",   "threshold_medium"),
-        (THRESHOLDS.wind.high,    "高風險",   "threshold_high"),
-        (THRESHOLDS.gust.high,    "陣風高風險", "threshold_extreme"),
+        (THRESHOLDS.wind.medium, f"Warning ({THRESHOLDS.wind.medium:.0f} kts)", "threshold_medium"),
+        (THRESHOLDS.wind.high,   f"Danger ({THRESHOLDS.wind.high:.0f} kts)",    "threshold_high"),
+        (THRESHOLDS.gust.high,   f"Gust Danger ({THRESHOLDS.gust.high:.0f} kts)", "threshold_extreme"),
     ]:
         fig.add_hline(
             y=val, line_dash="dot",
@@ -440,19 +435,19 @@ def _add_wind_traces(fig: go.Figure, df: pd.DataFrame, row: int) -> None:
         )
 
     _add_risk_background(fig, df, "wind_gust_kts", row)
-    fig.update_yaxes(title_text="風速 (節)", row=row, col=1)
+    fig.update_yaxes(title_text="Wind Speed (kts)", row=row, col=1)
 
 
 def _add_wave_traces(fig: go.Figure, df: pd.DataFrame, row: int) -> None:
-    """Row：浪高"""
+    """Row: Wave Height"""
     fig.add_trace(
         go.Scatter(
             x=df["time"], y=df["wave_sig_m"],
-            name="顯著浪高",
+            name="Sig. Wave Ht",
             line=dict(color=CHART_COLORS["wave_height"], width=2),
             fill="tozeroy", fillcolor="rgba(44, 160, 44, 0.2)",
             mode="lines",
-            hovertemplate="<b>浪高</b>: %{y:.2f} m<extra></extra>",
+            hovertemplate="<b>Sig. Wave</b>: %{y:.2f} m<extra></extra>",
         ),
         row=row, col=1,
     )
@@ -460,14 +455,14 @@ def _add_wave_traces(fig: go.Figure, df: pd.DataFrame, row: int) -> None:
         fig.add_trace(
             go.Scatter(
                 x=df["time"], y=df["wave_max_m"],
-                name="最大浪高",
+                name="Max Wave Ht",
                 line=dict(color="darkgreen", width=1, dash="dot"),
                 mode="lines",
-                hovertemplate="<b>最大浪</b>: %{y:.2f} m<extra></extra>",
+                hovertemplate="<b>Max Wave</b>: %{y:.2f} m<extra></extra>",
             ),
             row=row, col=1,
         )
-    fig.update_yaxes(title_text="浪高 (m)", row=row, col=1)
+    fig.update_yaxes(title_text="Wave Height (m)", row=row, col=1)
 
 
 def _add_force_traces(
@@ -476,7 +471,7 @@ def _add_force_traces(
     vessel_info: Optional[Dict[str, Any]],
     row: int,
 ) -> None:
-    """Row：風力 vs 纜繩抓力"""
+    """Row: Wind Force vs Mooring Capacity"""
     force_col = next(
         (c for c in ["gust_force_N", "total_force_N"] if c in df.columns),
         None,
@@ -486,10 +481,10 @@ def _add_force_traces(
         fig.add_trace(
             go.Scatter(
                 x=df["time"], y=force_kN,
-                name="總風力",
+                name="Wind Force",
                 line=dict(color=CHART_COLORS["wind_force"], width=2),
                 mode="lines",
-                hovertemplate="<b>風力</b>: %{y:.1f} kN<extra></extra>",
+                hovertemplate="<b>Force</b>: %{y:.1f} kN<extra></extra>",
             ),
             row=row, col=1,
         )
@@ -501,22 +496,22 @@ def _add_force_traces(
             line_dash="dashdot",
             line_color=CHART_COLORS["capacity_line"],
             line_width=3,
-            annotation_text=f"纜繩抓力 ({cap_kN:.0f} kN)",
+            annotation_text=f"Mooring Capacity ({cap_kN:.0f} kN)",
             annotation_position="top left",
             row=row, col=1,
         )
 
-    fig.update_yaxes(title_text="風力 (kN)", row=row, col=1)
+    fig.update_yaxes(title_text="Force (kN)", row=row, col=1)
 
 
 def _add_safety_factor_traces(
     fig: go.Figure, df: pd.DataFrame, row: int
 ) -> None:
-    """Row：安全係數"""
+    """Row: Safety Factor"""
     fig.add_trace(
         go.Scatter(
             x=df["time"], y=df["safety_factor"],
-            name="安全係數",
+            name="Safety Factor",
             line=dict(color=CHART_COLORS["safety_factor"], width=2),
             mode="lines+markers",
             marker=dict(size=4),
@@ -525,10 +520,10 @@ def _add_safety_factor_traces(
         row=row, col=1,
     )
     fig.add_hline(y=1.5, line_dash="dash", line_color="green",
-                  annotation_text="合格 (1.5)", row=row, col=1)
+                  annotation_text="Adequate (1.5)", row=row, col=1)
     fig.add_hline(y=1.2, line_dash="dash", line_color="red",
-                  annotation_text="危險 (1.2)", row=row, col=1)
-    fig.update_yaxes(title_text="係數 (SF)", row=row, col=1)
+                  annotation_text="Danger (1.2)", row=row, col=1)
+    fig.update_yaxes(title_text="Safety Factor (SF)", row=row, col=1)
 
 
 def _add_plotly_time_markers(
@@ -538,8 +533,8 @@ def _add_plotly_time_markers(
 ) -> None:
     """在 Plotly 圖表上加入靠/離泊時間標記"""
     markers = [
-        (berthing_time,  CHART_COLORS["berthing"],  "靠泊"),
-        (departure_time, CHART_COLORS["departure"], "離泊"),
+        (berthing_time,  CHART_COLORS["berthing"],  "Berthing"),
+        (departure_time, CHART_COLORS["departure"], "Departure"),
     ]
     for t, color, label in markers:
         if t is None:
@@ -610,7 +605,7 @@ def _add_risk_background(
 
 # ================= 獨立 Plotly 圖表函式 =================
 
-def plot_wind_rose(df: pd.DataFrame, title: str = "風玫瑰圖") -> go.Figure:
+def plot_wind_rose(df: pd.DataFrame, title: str = "Wind Rose") -> go.Figure:
     """風玫瑰圖：顯示各方向風速分布"""
     try:
         if "wind_dir_deg" not in df.columns or "wind_speed_kts" not in df.columns:
@@ -672,11 +667,11 @@ def plot_wind_rose(df: pd.DataFrame, title: str = "風玫瑰圖") -> go.Figure:
         return go.Figure()
 
 
-def plot_risk_heatmap(df: pd.DataFrame, title: str = "風險熱圖") -> go.Figure:
-    """風險等級熱圖：以色帶顯示時間序列風險變化"""
+def plot_risk_heatmap(df: pd.DataFrame, title: str = "Risk Heatmap") -> go.Figure:
+    """Risk level heatmap: colour band showing risk level over time"""
     try:
         if "risk_level" not in df.columns:
-            logger.warning("plot_risk_heatmap：缺少 risk_level 欄位")
+            logger.warning("plot_risk_heatmap: missing risk_level column")
             return go.Figure()
 
         _RISK_NUM = {"low": 1, "medium": 2, "high": 3, "extreme": 4}
@@ -692,14 +687,14 @@ def plot_risk_heatmap(df: pd.DataFrame, title: str = "風險熱圖") -> go.Figur
         fig = go.Figure(
             data=go.Heatmap(
                 x=df["time"],
-                y=["風險等級"],
+                y=["Risk Level"],
                 z=[z_vals],
                 colorscale=colorscale,
                 showscale=True,
                 colorbar=dict(
-                    title="等級",
+                    title="Level",
                     tickvals=[1, 2, 3, 4],
-                    ticktext=["低", "中", "高", "極高"],
+                    ticktext=["Low", "Med", "High", "Extreme"],
                 ),
             )
         )
