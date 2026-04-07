@@ -812,8 +812,9 @@ def render_detail_report(
 
     tug         = result.tug_recommendation
     final_tugs  = _get_tug_value(tug,"final_tug_count","final_tug_count", 0)
-    tug_ok      = _get_tug_value(tug,"adequacy","adequacy", False)
-    mooring_ok  = result.mooring_split.bow.status == "OK" and result.mooring_split.stern.status == "OK"
+    # Compliance checks use OCIMF MEG4 minimum SF≥1.7 (not the port-adjusted threshold)
+    mooring_ok  = sf >= 1.7
+    tug_ok      = sf >= 1.7
 
     # ── 決策建議判定 ──────────────────────────────────────────
     if result.risk_level == "low":
@@ -1070,18 +1071,18 @@ def render_chart_analysis(
     """渲染圖表分析（Matplotlib 靜態圖 + Plotly 互動式時間軸）"""
     ps = PlotService(analyzer)
 
-    tab_c1, tab_c2 = st.tabs(["綜合趨勢", "時間軸分析"])
+    tab_c1, tab_c2 = st.tabs(["Weather Trend", "Timeline Analysis"])
 
     with tab_c1:
-        st.subheader("📊 風速與浪高趨勢")
+        st.subheader("📊 Wind Speed & Wave Height Trend")
         st.pyplot(ps.plot_wind_trend(vessel, result))
         st.pyplot(ps.plot_wave_trend(vessel, result))
         st.pyplot(ps.plot_force(vessel, result))
 
     with tab_c2:
-        st.subheader("📈 增強型時間軸分析")
+        st.subheader("📈 Enhanced Weather Timeline")
         if df_detail is None or len(df_detail) == 0:
-            st.info("無可用的詳細氣象資料")
+            st.info("No detailed weather data available.")
             return
 
         try:
@@ -1160,9 +1161,9 @@ def render_risk_analysis_report(
 
     tug = result.tug_recommendation
     final_tugs = _get_tug_value(tug,"final_tug_count","final_tug_count",0)
-    tug_ok     = _get_tug_value(tug,"adequacy","adequacy",False)
-    mooring_ok = (result.mooring_split.bow.status == "OK"
-                  and result.mooring_split.stern.status == "OK")
+    # Compliance checks use OCIMF MEG4 minimum SF≥1.7 (not the port-adjusted threshold)
+    mooring_ok = sf >= 1.7
+    tug_ok     = sf >= 1.7
 
     moor_cap_kN = (mooring_cap.total_capacity_kN if mooring_cap else total_kN)
     tug_cap_kN  = (tug_cap.total_push_kN if tug_cap else 0.0)

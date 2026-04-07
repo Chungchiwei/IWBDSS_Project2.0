@@ -161,7 +161,10 @@ class PlotService:
     def __init__(self, analyzer: Any) -> None:
         self.analyzer = analyzer
         self.data      = analyzer.data
-        self._port_name: str = getattr(analyzer, "port_name", "Port")
+        raw_name = getattr(analyzer, "port_name", "Port") or "Port"
+        # Strip non-ASCII characters (Chinese) so Matplotlib can render the title
+        ascii_name = "".join(c for c in raw_name if ord(c) < 128).strip()
+        self._port_name: str = ascii_name if ascii_name else "Port"
 
     # ── 風速趨勢 ──────────────────────────────────────────────
 
