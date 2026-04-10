@@ -343,20 +343,11 @@ def _parse_weather_content(
     port_code: Optional[str],
     crawler: Any,
 ) -> None:
-    """
-    解析氣象內容並寫入 session_state。
-
-    修正 #U1：明確傳入 max_hours=None，不截斷資料。
-    原版使用預設值 max_hours=48，導致在港超過 48h 的航次
-    只能看到前 48h 的氣象，後半段分析完全空白。
-    改為 None 後，WeatherAnalyzer 可拿到完整時間範圍，
-    使用者在側邊欄自由選擇 ETA/ETD 均不受限制。
-    """
     parser = WeatherParser()
     try:
         p_parsed_name, data, conditions, warns = parser.parse_content(
             content,
-            max_hours=None,   # 修正 #U1：不截斷，保留完整預報資料
+            max_hours=None,
         )
         final_name = p_name or p_parsed_name
 
@@ -371,9 +362,33 @@ def _parse_weather_content(
                 for w in warns:
                     st.warning(w)
 
-    except Exception:
+    except TypeError as exc:
+        # 最常見原因：parse_content 不接受 max_hours 參數（舊版 WeatherParser）
+        logger.warning("parse_content 不支援 max_hours，改用無參數呼叫：%s", exc)
+        try:
+            p_parsed_name, data, conditions, warns = parser.parse_content(content)
+            final_name = p_name or p_parsed_name
+            if port_code:
+                st.session_state.port_info = get_port_full_info(port_code, crawler)
+            st.session_state.analyzer = WeatherAnalyzer(final_name, data, conditions=conditions)
+            st.success(f"✅ 已載入 {len(data)} 筆氣象資料（相容模式）")
+            if warns:
+                with st.expander(f"⚠️ 解析警告 ({len(warns)})"):
+                    for w in warns:
+                        st.warning(w)
+        except Exception as exc2:
+            import traceback
+            logger.exception("氣象資料解析失敗（相容模式）port_code=%s", port_code)
+            st.error(f"❌ 解析失敗（相容模式）：{type(exc2).__name__}: {exc2}")
+            st.code(traceback.format_exc(), language="text")
+            st.session_state.analyzer = None
+
+    except Exception as exc:
+        import traceback
         logger.exception("氣象資料解析失敗（port_code=%s）", port_code)
-        st.error("❌ 解析失敗，請確認資料格式")
+        # 暫時顯示完整錯誤，方便診斷
+        st.error(f"❌ 解析失敗：{type(exc).__name__}: {exc}")
+        st.code(traceback.format_exc(), language="text")
         st.session_state.analyzer = None
 
 
