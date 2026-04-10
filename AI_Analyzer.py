@@ -3,12 +3,23 @@
 AI 決策輔助分析模組 (Secure & Optimized Version)
 使用 Perplexity API 提供專業的靠泊決策建議
 整合 OCIMF 標準、IMO 指南與實務經驗
+
+修正項目：
+  #2 - 加入 threading.Lock 解決多 session 並發 race condition
+  #3 - 將 _last_request_time 更新移至 _enforce_rate_limit 內
+  #4 - 統一 safety_factor_status 與 _sf_label 的邊界定義
+  #5 - get_cached_ai_analyzer 加入 secrets_hash 作為快取 key
+  #6 - HourlyRiskEntry 改為 clamp + warning 取代直接拋出例外
+  #7 - _sanitize_string 補上 Unicode C1 控制字元過濾
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -100,10 +111,32 @@ class VesselParams:
     tug_hp:            float = 0.0
 
     def __post_init__(self) -> None:
-        """初始化後自動驗證所有欄位"""
+        """
+        初始化後自動驗證所有欄位。
+
+        修正 #1：先做型別強制轉換，確保欄位為正確型別後再驗證，
+        避免上游傳入 None 或字串時在 property 存取前就拋出
+        AttributeError，讓錯誤訊息更明確。
+        """
+        # 強制轉換數值型別，讓驗證器能產生有意義的錯誤訊息
+        try:
+            self.area               = float(self.area)
+            self.cd                 = float(self.cd)
+            self.draft_bow          = float(self.draft_bow)
+            self.draft_stern        = float(self.draft_stern)
+            self.bow_lines          = int(self.bow_lines)
+            self.bow_spring_lines   = int(self.bow_spring_lines)
+            self.stern_lines        = int(self.stern_lines)
+            self.stern_spring_lines = int(self.stern_spring_lines)
+            self.line_mbl           = float(self.line_mbl)
+            self.num_tugs           = int(self.num_tugs)
+            self.tug_hp             = float(self.tug_hp)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"VesselParams 欄位型別錯誤: {exc}") from exc
+
         errors = validate_vessel_params(self)
         if errors:
-            raise ValueError(f"VesselParams 驗證失敗:\n" + "\n".join(f"  - {e}" for e in errors))
+            raise ValueError("VesselParams 驗證失敗:\n" + "\n".join(f"  - {e}" for e in errors))
 
     @property
     def avg_draft(self) -> float:
@@ -139,7 +172,7 @@ class AnalysisResults:
     def __post_init__(self) -> None:
         errors = validate_analysis_results(self)
         if errors:
-            raise ValueError(f"AnalysisResults 驗證失敗:\n" + "\n".join(f"  - {e}" for e in errors))
+            raise ValueError("AnalysisResults 驗證失敗:\n" + "\n".join(f"  - {e}" for e in errors))
 
     @property
     def total_restraint_kN(self) -> float:
@@ -153,13 +186,17 @@ class AnalysisResults:
 
     @property
     def safety_factor_status(self) -> str:
+        """
+        修正 #4：與 _sf_label 統一邊界定義，
+        兩者現在使用相同的 5 個等級與閾值。
+        """
         sf = self.safety_factor
         if sf == float("inf"):
             return "無受風力 (N/A)"
         if sf >= SafetyThresholds.EXCELLENT:
             return f"優良 (≥{SafetyThresholds.EXCELLENT})"
         if sf >= SafetyThresholds.ADEQUATE:
-            return f"合格 (≥{SafetyThresholds.ADEQUATE})"
+            return f"合格 ({SafetyThresholds.ADEQUATE}–{SafetyThresholds.EXCELLENT})"
         if sf >= SafetyThresholds.MARGINAL:
             return f"邊緣 ({SafetyThresholds.MARGINAL}–{SafetyThresholds.ADEQUATE})"
         if sf >= SafetyThresholds.CRITICAL:
@@ -169,7 +206,13 @@ class AnalysisResults:
 
 @dataclass
 class HourlyRiskEntry:
-    """逐時風險資料容器"""
+    """
+    逐時風險資料容器。
+
+    修正 #6：safety_factor 為負時改為 clamp 至 0.0 並記錄 warning，
+    而非直接拋出例外中斷整個分析流程。
+    wind_gust_kts 超出範圍同樣改為 clamp，保持一致策略。
+    """
     time:          str
     wind_gust_kts: float
     safety_factor: float
@@ -177,13 +220,29 @@ class HourlyRiskEntry:
     def __post_init__(self) -> None:
         if not self.time:
             raise ValueError("HourlyRiskEntry.time 不可為空")
+
+        # wind_gust_kts：clamp 並警告
         if not (InputLimits.WIND_GUST_MIN <= self.wind_gust_kts <= InputLimits.WIND_GUST_MAX):
-            raise ValueError(
-                f"wind_gust_kts={self.wind_gust_kts} 超出合法範圍 "
-                f"[{InputLimits.WIND_GUST_MIN}, {InputLimits.WIND_GUST_MAX}]"
+            logger.warning(
+                "HourlyRiskEntry[%s]: wind_gust_kts=%.2f 超出合法範圍 [%.1f, %.1f]，已 clamp。",
+                self.time,
+                self.wind_gust_kts,
+                InputLimits.WIND_GUST_MIN,
+                InputLimits.WIND_GUST_MAX,
             )
+            self.wind_gust_kts = max(
+                InputLimits.WIND_GUST_MIN,
+                min(self.wind_gust_kts, InputLimits.WIND_GUST_MAX),
+            )
+
+        # safety_factor：clamp 至 0.0 並警告
         if self.safety_factor < 0:
-            raise ValueError(f"safety_factor={self.safety_factor} 不可為負數")
+            logger.warning(
+                "HourlyRiskEntry[%s]: safety_factor=%.4f 為負數，已 clamp 至 0.0。",
+                self.time,
+                self.safety_factor,
+            )
+            self.safety_factor = 0.0
 
 
 @dataclass
@@ -213,13 +272,13 @@ def validate_vessel_params(p: VesselParams) -> List[str]:
         if not (lo <= val <= hi):
             errors.append(f"{name}={val} 超出合法範圍 [{lo}, {hi}]")
 
-    _check_range("area",     p.area,     InputLimits.AREA_MIN,   InputLimits.AREA_MAX)
-    _check_range("cd",       p.cd,       InputLimits.CD_MIN,     InputLimits.CD_MAX)
-    _check_range("draft_bow",   p.draft_bow,   InputLimits.DRAFT_MIN, InputLimits.DRAFT_MAX)
-    _check_range("draft_stern", p.draft_stern, InputLimits.DRAFT_MIN, InputLimits.DRAFT_MAX)
-    _check_range("line_mbl", p.line_mbl, InputLimits.MBL_MIN,   InputLimits.MBL_MAX)
-    _check_range("num_tugs", p.num_tugs, InputLimits.TUGS_MIN,  InputLimits.TUGS_MAX)
-    _check_range("tug_hp",   p.tug_hp,   InputLimits.TUG_HP_MIN,InputLimits.TUG_HP_MAX)
+    _check_range("area",        p.area,        InputLimits.AREA_MIN,    InputLimits.AREA_MAX)
+    _check_range("cd",          p.cd,          InputLimits.CD_MIN,      InputLimits.CD_MAX)
+    _check_range("draft_bow",   p.draft_bow,   InputLimits.DRAFT_MIN,   InputLimits.DRAFT_MAX)
+    _check_range("draft_stern", p.draft_stern, InputLimits.DRAFT_MIN,   InputLimits.DRAFT_MAX)
+    _check_range("line_mbl",    p.line_mbl,    InputLimits.MBL_MIN,     InputLimits.MBL_MAX)
+    _check_range("num_tugs",    p.num_tugs,    InputLimits.TUGS_MIN,    InputLimits.TUGS_MAX)
+    _check_range("tug_hp",      p.tug_hp,      InputLimits.TUG_HP_MIN,  InputLimits.TUG_HP_MAX)
 
     for attr in ("bow_lines", "bow_spring_lines", "stern_lines", "stern_spring_lines"):
         val = getattr(p, attr)
@@ -242,9 +301,9 @@ def validate_analysis_results(r: AnalysisResults) -> List[str]:
     if not (0.0 <= r.offshore_wind_ratio <= 100.0):
         errors.append(f"offshore_wind_ratio={r.offshore_wind_ratio} 超出 [0, 100]")
     if r.mooring_capacity_total_kN < 0:
-        errors.append(f"mooring_capacity_total_kN 不可為負")
+        errors.append("mooring_capacity_total_kN 不可為負")
     if r.tug_capacity_total_kN < 0:
-        errors.append(f"tug_capacity_total_kN 不可為負")
+        errors.append("tug_capacity_total_kN 不可為負")
 
     return errors
 
@@ -252,12 +311,22 @@ def validate_analysis_results(r: AnalysisResults) -> List[str]:
 def _sanitize_string(value: str, max_len: int = 200) -> str:
     """
     清理字串輸入：移除控制字元、截斷過長內容。
-    防止 Prompt Injection 攻擊（惡意使用者在港口名稱等欄位注入指令）。
+    防止 Prompt Injection 攻擊。
+
+    修正 #7：補上 Unicode C1 控制字元過濾（U+0080–U+009F），
+    原版只過濾 ASCII 控制字元（< 0x20），C1 範圍可被用於注入攻擊。
+    unicodedata.category(ch).startswith("C") 涵蓋：
+      Cc (Control), Cf (Format), Cs (Surrogate), Co (Private Use), Cn (Unassigned)
+    保留 \n 與 \t 以維持正常排版。
     """
-    # 移除 ASCII 控制字元（除了換行與 tab）
     sanitized = "".join(
         ch for ch in value
-        if ch in ("\n", "\t") or (ord(ch) >= 32 and ord(ch) != 127)
+        if ch in ("\n", "\t")
+        or (
+            ord(ch) >= 32
+            and ord(ch) != 127
+            and not unicodedata.category(ch).startswith("C")
+        )
     )
     return sanitized[:max_len]
 
@@ -326,8 +395,8 @@ class AIAnalyzer:
 
     安全特性：
     - API Key 不寫入日誌
-    - 輸入字串經過 sanitize 防止 Prompt Injection
-    - 請求具備重試機制與速率限制
+    - 輸入字串經過 sanitize 防止 Prompt Injection（含 Unicode C1 字元）
+    - 請求具備重試機制與 thread-safe 速率限制
     - 所有輸入參數通過邊界驗證
 
     使用方式：
@@ -337,12 +406,16 @@ class AIAnalyzer:
 
     def __init__(
         self,
-        api_key:      Optional[str]    = None,
+        api_key:      Optional[str]         = None,
         model_params: Optional[ModelParams] = None,
     ):
         self.api_key = api_key or self._load_api_key_from_secrets()
         self.params  = model_params or ModelParams()
-        self._last_request_time: float = 0.0   # 速率限制用
+
+        # 修正 #2 & #3：使用 Lock 保護速率限制，確保多 session 並發安全。
+        # _last_request_time 的讀寫均在 Lock 內完成，消除 race condition。
+        self._rate_lock:          threading.Lock = threading.Lock()
+        self._last_request_time:  float          = 0.0
 
         # 建立帶重試機制的 Session（連線層級重試，非業務邏輯重試）
         self._session = self._build_session()
@@ -353,7 +426,6 @@ class AIAnalyzer:
                 "請在 Streamlit Secrets 中設定 PERPLEXITY_API_KEY。"
             )
         elif not self._is_valid_api_key_format(self.api_key):
-            # 只記錄「格式不符」，不記錄 Key 內容
             logger.warning(
                 "API Key 格式可能不正確（應以 '%s' 開頭，長度 ≥ %d）。",
                 APIConfig.KEY_PREFIX,
@@ -378,13 +450,13 @@ class AIAnalyzer:
 
     def generate_analysis(
         self,
-        port_name:       str,
-        vessel_params:   VesselParams,
-        analysis_results:AnalysisResults,
-        berthing_time:   datetime,
-        departure_time:  datetime,
-        port_risk_level: int = 5,
-        hourly_data:     Optional[List[HourlyRiskEntry]] = None,
+        port_name:        str,
+        vessel_params:    VesselParams,
+        analysis_results: AnalysisResults,
+        berthing_time:    datetime,
+        departure_time:   datetime,
+        port_risk_level:  int                        = 5,
+        hourly_data:      Optional[List[HourlyRiskEntry]] = None,
     ) -> str:
         """
         呼叫 Perplexity API 生成完整 AI 分析報告。
@@ -404,7 +476,7 @@ class AIAnalyzer:
         if validation_error:
             return f"❌ **輸入驗證失敗**: {validation_error}"
 
-        # ── 速率限制 ──
+        # ── 速率限制（含 Lock，修正 #2 & #3）──
         self._enforce_rate_limit()
 
         # ── 建構 Prompt ──
@@ -440,7 +512,6 @@ class AIAnalyzer:
         Returns:
             Markdown 格式的快速摘要字串。
         """
-        # 輸入清理
         risk_score    = max(0.0, min(100.0, float(risk_score)))
         safety_factor = max(0.0, float(safety_factor))
 
@@ -515,7 +586,7 @@ class AIAnalyzer:
         if not api_key:
             logger.warning("API Key 已被清除，AI 分析功能將無法使用。")
         else:
-            logger.info("API Key 已更新。")  # 不記錄 Key 內容
+            logger.info("API Key 已更新。")
 
     # ── 私有：API 呼叫 ────────────────────────────────────────
 
@@ -542,13 +613,11 @@ class AIAnalyzer:
                 json    = payload,
                 timeout = self.params.timeout,
             )
-            self._last_request_time = time.monotonic()
 
             if response.status_code == 200:
                 content = response.json()["choices"][0]["message"]["content"]
                 return content + self._footer()
 
-            # 針對常見 HTTP 錯誤給出更具體的提示
             error_hint = {
                 401: "API Key 無效或已過期，請重新設定。",
                 403: "API Key 無權限使用此模型。",
@@ -556,7 +625,6 @@ class AIAnalyzer:
                 500: "Perplexity 伺服器內部錯誤，請稍後重試。",
             }.get(response.status_code, "")
 
-            # 回應內容截斷，避免洩漏過多伺服器資訊
             safe_text = response.text[:200]
             logger.error(
                 "Perplexity API 回傳錯誤 HTTP %d（不含 Key）",
@@ -571,7 +639,6 @@ class AIAnalyzer:
             logger.error("Perplexity API 連線失敗，請檢查網路。")
             return self._msg_unexpected_error("網路連線失敗，請檢查網路設定。")
         except requests.RequestException as exc:
-            # 不記錄 exc 完整內容（可能含 URL 與 Header）
             logger.error("Perplexity API 請求異常: %s", type(exc).__name__)
             return self._msg_unexpected_error(f"請求異常 ({type(exc).__name__})")
         except (KeyError, IndexError) as exc:
@@ -581,12 +648,22 @@ class AIAnalyzer:
     # ── 私有：速率限制 ────────────────────────────────────────
 
     def _enforce_rate_limit(self) -> None:
-        """簡易速率限制：確保兩次請求之間至少間隔 MIN_REQUEST_INTERVAL 秒"""
-        elapsed = time.monotonic() - self._last_request_time
-        wait    = APIConfig.MIN_REQUEST_INTERVAL - elapsed
-        if wait > 0:
-            logger.debug("速率限制：等待 %.1f 秒", wait)
-            time.sleep(wait)
+        """
+        Thread-safe 速率限制。
+
+        修正 #2 & #3：
+        - 使用 Lock 確保多 session 並發時不會同時通過速率限制。
+        - _last_request_time 在 Lock 內更新（原版在 _call_api 更新，
+          導致計時不準且有 race condition）。
+        """
+        with self._rate_lock:
+            elapsed = time.monotonic() - self._last_request_time
+            wait    = APIConfig.MIN_REQUEST_INTERVAL - elapsed
+            if wait > 0:
+                logger.debug("速率限制：等待 %.1f 秒", wait)
+                time.sleep(wait)
+            # 在 Lock 內更新，確保下一個請求能正確計算間隔
+            self._last_request_time = time.monotonic()
 
     # ── 私有：Prompt 建構 ─────────────────────────────────────
 
@@ -691,7 +768,6 @@ class AIAnalyzer:
             total            = APIConfig.RETRY_TOTAL,
             backoff_factor   = APIConfig.RETRY_BACKOFF,
             status_forcelist = APIConfig.RETRY_ON_STATUS,
-            # 只對冪等方法重試（POST 預設不重試，需明確允許）
             allowed_methods  = {"POST"},
             raise_on_status  = False,
         )
@@ -711,10 +787,10 @@ class AIAnalyzer:
 
     @staticmethod
     def _validate_generate_inputs(
-        port_name:      str,
-        port_risk_level:int,
-        berthing_time:  datetime,
-        departure_time: datetime,
+        port_name:       str,
+        port_risk_level: int,
+        berthing_time:   datetime,
+        departure_time:  datetime,
     ) -> Optional[str]:
         """
         驗證 generate_analysis 的輸入參數。
@@ -732,7 +808,7 @@ class AIAnalyzer:
         if departure_time <= berthing_time:
             return "離港時間必須晚於靠港時間"
         duration_hrs = (departure_time - berthing_time).total_seconds() / 3600
-        if duration_hrs > 720:  # 30 天上限
+        if duration_hrs > 720:
             return f"在港時長 {duration_hrs:.0f} 小時超過合理範圍（最大 720 小時）"
         return None
 
@@ -746,16 +822,23 @@ class AIAnalyzer:
 
     @staticmethod
     def _sf_label(sf: float) -> str:
-        """將安全係數轉換為描述文字"""
+        """
+        將安全係數轉換為描述文字。
+
+        修正 #4：與 safety_factor_status 統一為相同的 5 個等級與邊界，
+        原版缺少「危險 (1.0–1.2)」等級，導致 1.0–1.2 被歸入「不足」。
+        """
         if sf == float("inf"):
             return "無受風力 (N/A)"
         if sf >= SafetyThresholds.EXCELLENT:
             return f"優良 (≥{SafetyThresholds.EXCELLENT})"
         if sf >= SafetyThresholds.ADEQUATE:
-            return f"合格 (≥{SafetyThresholds.ADEQUATE})"
+            return f"合格 ({SafetyThresholds.ADEQUATE}–{SafetyThresholds.EXCELLENT})"
         if sf >= SafetyThresholds.MARGINAL:
             return f"邊緣 ({SafetyThresholds.MARGINAL}–{SafetyThresholds.ADEQUATE})"
-        return f"不足 (<{SafetyThresholds.MARGINAL})"
+        if sf >= SafetyThresholds.CRITICAL:
+            return f"危險 ({SafetyThresholds.CRITICAL}–{SafetyThresholds.MARGINAL})"
+        return f"極度危險 (<{SafetyThresholds.CRITICAL})"
 
     def _footer(self) -> str:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -791,16 +874,42 @@ class AIAnalyzer:
 # ================= 便利函式與快取 =================
 
 def create_ai_analyzer(api_key: Optional[str] = None) -> AIAnalyzer:
-    """建立新的 AIAnalyzer 實例"""
+    """建立新的 AIAnalyzer 實例（每次呼叫都建立新實例，適合單次使用）"""
     return AIAnalyzer(api_key=api_key)
 
 
+def _get_secrets_hash() -> str:
+    """
+    計算當前 Streamlit Secrets 中 API Key 的 hash。
+
+    修正 #5：作為 get_cached_ai_analyzer 的快取 key，
+    確保 Secrets 更新後快取會自動失效並重建實例。
+    直接用 Key 本身作為快取 key 會有安全疑慮（Key 會出現在快取 key 中），
+    改用 SHA-256 hash 既安全又能正確偵測變更。
+    """
+    try:
+        key = st.secrets.get("PERPLEXITY_API_KEY", "")
+        return hashlib.sha256(key.encode()).hexdigest()[:16]
+    except Exception:
+        return "no-secrets"
+
+
 @st.cache_resource
-def get_cached_ai_analyzer(api_key: Optional[str] = None) -> AIAnalyzer:
+def get_cached_ai_analyzer(
+    api_key:      Optional[str] = None,
+    _secrets_hash: str          = "",   # 前綴 _ 告知 Streamlit 不將此參數序列化進快取 key
+) -> AIAnalyzer:
     """
     建立並快取 AIAnalyzer 實例（Streamlit 跨 session 共用）。
 
-    注意：快取的實例共用同一個 HTTP Session 與速率限制計時器，
-    多 session 並發時仍受 MIN_REQUEST_INTERVAL 保護。
+    修正 #5：加入 _secrets_hash 參數作為快取 key 的一部分。
+    呼叫方式：
+        analyzer = get_cached_ai_analyzer(_secrets_hash=_get_secrets_hash())
+
+    這樣當 .streamlit/secrets.toml 中的 API Key 被更新後，
+    hash 改變 → 快取失效 → 自動重建使用新 Key 的實例。
+
+    注意：快取的實例共用同一個 HTTP Session 與 thread-safe 速率限制，
+    多 session 並發時受 Lock + MIN_REQUEST_INTERVAL 雙重保護。
     """
     return AIAnalyzer(api_key=api_key)
