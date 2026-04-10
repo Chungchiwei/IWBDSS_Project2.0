@@ -990,7 +990,7 @@ def render_detail_report(
             else:
                 st.warning("⚠️ 建議增加拖船支援")
 
-    with st.expander("🚨 應變觸發條件清單（船長 & 值班官）"):
+    with st.expander("🚨 應變觸發條件清單"):
         st.caption("以下觸發條件應預先告知全體值班人員，並確認應變程序。")
         triggers = [
             ("#D97706", "MEDIUM",   "Bft 7 — 陣風 28–33 kts",
