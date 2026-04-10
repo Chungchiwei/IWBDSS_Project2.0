@@ -343,12 +343,24 @@ def _parse_weather_content(
     port_code: Optional[str],
     crawler: Any,
 ) -> None:
+    """
+    解析氣象內容並寫入 session_state。
+
+    修正：移除 max_hours=None（analysis.WeatherParser.parse_content 無此參數），
+    直接呼叫 parse_content(content)。
+    """
+    import traceback as _tb
+
+    # ── 防禦：content 為空時提早結束 ─────────────────────────
+    if not content or not content.strip():
+        st.warning("⚠️ 氣象資料內容為空，請重新下載")
+        st.session_state.analyzer = None
+        return
+
     parser = WeatherParser()
     try:
-        p_parsed_name, data, conditions, warns = parser.parse_content(
-            content,
-            max_hours=None,
-        )
+        # 直接呼叫，不傳 max_hours（analysis.py 無此參數）
+        p_parsed_name, data, conditions, warns = parser.parse_content(content)
         final_name = p_name or p_parsed_name
 
         if port_code:
@@ -362,33 +374,19 @@ def _parse_weather_content(
                 for w in warns:
                     st.warning(w)
 
-    except TypeError as exc:
-        # 最常見原因：parse_content 不接受 max_hours 參數（舊版 WeatherParser）
-        logger.warning("parse_content 不支援 max_hours，改用無參數呼叫：%s", exc)
-        try:
-            p_parsed_name, data, conditions, warns = parser.parse_content(content)
-            final_name = p_name or p_parsed_name
-            if port_code:
-                st.session_state.port_info = get_port_full_info(port_code, crawler)
-            st.session_state.analyzer = WeatherAnalyzer(final_name, data, conditions=conditions)
-            st.success(f"✅ 已載入 {len(data)} 筆氣象資料（相容模式）")
-            if warns:
-                with st.expander(f"⚠️ 解析警告 ({len(warns)})"):
-                    for w in warns:
-                        st.warning(w)
-        except Exception as exc2:
-            import traceback
-            logger.exception("氣象資料解析失敗（相容模式）port_code=%s", port_code)
-            st.error(f"❌ 解析失敗（相容模式）：{type(exc2).__name__}: {exc2}")
-            st.code(traceback.format_exc(), language="text")
-            st.session_state.analyzer = None
+    except ValueError as exc:
+        # parse_content 找不到 WIND 區段，或無法解析任何記錄
+        st.error(f"❌ 氣象資料格式錯誤：{exc}")
+        st.caption("請確認資料包含 'WIND kts' 區段，並重新下載。")
+        logger.warning("氣象資料解析 ValueError（port_code=%s）: %s", port_code, exc)
+        st.session_state.analyzer = None
 
     except Exception as exc:
-        import traceback
-        logger.exception("氣象資料解析失敗（port_code=%s）", port_code)
-        # 暫時顯示完整錯誤，方便診斷
+        # 其他未預期錯誤，顯示完整 traceback 供診斷
         st.error(f"❌ 解析失敗：{type(exc).__name__}: {exc}")
-        st.code(traceback.format_exc(), language="text")
+        with st.expander("🔍 完整錯誤訊息（診斷用）"):
+            st.code(_tb.format_exc(), language="text")
+        logger.exception("氣象資料解析失敗（port_code=%s）", port_code)
         st.session_state.analyzer = None
 
 
