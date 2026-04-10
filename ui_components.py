@@ -1895,8 +1895,8 @@ def render_welcome_page() -> None:
                 f"box-shadow:0 2px 10px rgba(0,0,0,0.07);margin-bottom:12px;"
                 f"border-left:4px solid {color}'>"
                 f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:8px'>"
-                f"<div style='background:{color};color:white;border-radius:50%;width:26
-                                f"px;height:26px;display:flex;align-items:center;justify-content:center;"
+                f"<div style='background:{color};color:white;border-radius:50%;width:26"
+                f"px;height:26px;display:flex;align-items:center;justify-content:center;"
                 f"font-weight:700;font-size:0.85em;flex-shrink:0'>{num}</div>"
                 f"<div style='font-weight:700;color:#111827;font-size:0.92em'>{title}</div>"
                 f"</div>"
