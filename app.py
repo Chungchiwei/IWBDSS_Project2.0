@@ -12,6 +12,11 @@ IWBDSS Pro — 船舶靠泊決策輔助系統
   app_config.py   → 常數與設定
   app_helpers.py  → 共用輔助函式
   font_loader.py  → Matplotlib 中文字體設定
+
+修正項目：
+  #A - 移除模組頂層 PERPLEXITY_API_KEY 常數（import 時求值，st.secrets 可能未就緒）
+  #B - 移除 _get_ai_analyzer 的 @st.cache_resource（雙層快取導致 Key 在錯誤時機被捕捉）
+  #C - API Key 改為在函式執行時動態讀取，並傳入 _secrets_hash 確保快取正確失效
 """
 from __future__ import annotations
 
@@ -35,7 +40,7 @@ def _import_modules():
         "models":        ["VesselInfo", "AnalysisResult"],
         "font_loader":   ["ensure_chinese_font"],
         "weather_crawler":       ["PortWeatherCrawler"],
-        "AI_Analyzer":   ["get_cached_ai_analyzer"],
+        "AI_Analyzer":   ["get_cached_ai_analyzer", "_get_secrets_hash"],  # 修正 #C：同時匯入 _get_secrets_hash
         "app_config":    [
             "PHYSICS",
             "MOORING",
@@ -92,6 +97,7 @@ AnalysisResult         = _mods["AnalysisResult"]
 ensure_chinese_font    = _mods["ensure_chinese_font"]
 PortWeatherCrawler     = _mods["PortWeatherCrawler"]
 get_cached_ai_analyzer = _mods["get_cached_ai_analyzer"]
+_get_secrets_hash      = _mods["_get_secrets_hash"]      # 修正 #C
 
 # app_config
 PHYSICS                = _mods["PHYSICS"]
@@ -108,7 +114,11 @@ score_to_risk_level    = _mods["score_to_risk_level"]
 risk_level_to_zh       = _mods["risk_level_to_zh"]
 
 FIXED_SAFETY_FACTOR    = MOORING.fixed_safety_factor
-PERPLEXITY_API_KEY     = AppConfig.perplexity_api_key()
+
+# 修正 #A：移除模組頂層的 PERPLEXITY_API_KEY 常數。
+# 原版在 import 時立即執行 AppConfig.perplexity_api_key()，
+# 此時 st.secrets 在部分部署環境下可能尚未就緒，導致取得空字串。
+# Key 的讀取改為在 _get_ai_analyzer() 執行時才進行（見下方服務初始化區塊）。
 
 # app_helpers
 normalize_dataframe    = _mods["normalize_dataframe"]
@@ -124,8 +134,8 @@ render_detail_report   = _mods["render_detail_report"]
 render_chart_analysis  = _mods["render_chart_analysis"]
 render_ai_analysis     = _mods["render_ai_analysis"]
 render_data_list       = _mods["render_data_list"]
-render_welcome_page        = _mods["render_welcome_page"]
-render_berthing_advisory   = _mods["render_berthing_advisory"]
+render_welcome_page    = _mods["render_welcome_page"]
+render_berthing_advisory = _mods["render_berthing_advisory"]
 
 
 # ==================== 頁面配置 ====================
@@ -163,9 +173,38 @@ def _get_crawler() -> PortWeatherCrawler:
     return PortWeatherCrawler()
 
 
-@st.cache_resource
 def _get_ai_analyzer():
-    return get_cached_ai_analyzer(PERPLEXITY_API_KEY)
+    """
+    建立並回傳快取的 AIAnalyzer 實例。
+
+    修正 #B：移除原本套在此函式上的 @st.cache_resource。
+    原版形成「雙層快取」：
+      外層（此函式）快取 key = 無參數簽名，永遠命中同一快取；
+      內層（get_cached_ai_analyzer）才是真正帶 Key 的快取。
+    雙層快取導致外層在第一次執行後就固定，即使 Key 已更新也不會
+    重新呼叫內層，造成 AIAnalyzer 始終持有舊的（或空的）Key。
+
+    修正 #C：API Key 改為在此函式執行時動態讀取（而非模組頂層），
+    確保 st.secrets 已完全就緒。同時傳入 _secrets_hash 作為
+    get_cached_ai_analyzer 的快取 key，讓 Key 更新後快取能正確失效。
+    """
+    api_key      = AppConfig.perplexity_api_key()   # 執行時才讀取
+    secrets_hash = _get_secrets_hash()               # 用於快取失效偵測
+
+    # 除錯用：確認 Key 是否正確讀取（僅顯示前綴，不暴露完整 Key）
+    if api_key:
+        logger.info(
+            "AI Analyzer 初始化 — Key 前綴: %s****，hash: %s",
+            api_key[:8],
+            secrets_hash,
+        )
+    else:
+        logger.warning("AI Analyzer 初始化 — API Key 為空，AI 分析功能將無法使用。")
+
+    return get_cached_ai_analyzer(
+        api_key       = api_key,
+        _secrets_hash = secrets_hash,
+    )
 
 
 crawler = _get_crawler()
@@ -240,7 +279,7 @@ def _compute_mooring_restraint_kN(vessel: VesselInfo) -> float:
 
     與 WeatherAnalyzer._calc_mooring_restraint 邏輯完全一致。
     """
-    wll_N        = vessel.mbl * vessel.safety_factor  # WLL = MBL × 0.33 → 等效 SF=3.0
+    wll_N        = vessel.mbl * vessel.safety_factor
     head_count   = vessel.bow_lines + vessel.stern_lines
     spring_count = vessel.bow_spring_lines + vessel.stern_spring_lines
     trans_N      = (
@@ -357,7 +396,6 @@ def _build_detail_dataframe(
     sf_list:          list[float] = []
 
     for _, row in df.iterrows():
-        # 用 .item() 或 float() 強制從 Series/ndarray 取出純量
         gust_kts = float(row["wind_gust_kts"]) if "wind_gust_kts" in df.columns else 0.0
         dir_deg  = float(row["wind_dir_deg"])  if "wind_dir_deg"  in df.columns else 0.0
 
