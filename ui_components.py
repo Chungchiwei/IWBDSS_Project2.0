@@ -1,30 +1,16 @@
 # ui_components.py
-"""
-UI 組件模組
-
-負責所有 Streamlit UI 渲染，包含：
-  - 側邊欄輸入（港口選擇、船舶參數）
-  - 港口資訊卡片
-  - KPI 指標
-  - 詳細報告（風險警示、纜繩、拖船、受力）
-  - 圖表分析（Matplotlib + Plotly）
-  - AI 分析
-  - 數據列表
-
-修正項目：
-  #U1 - _parse_weather_content：明確傳入 max_hours=None，不截斷資料
-  #U2 - render_sidebar db_data 解包：防禦性解包，相容舊版 schema
-  #U3 - render_ai_analysis safety_factor：改從 MOORING.fixed_safety_factor 取得
-"""
 from __future__ import annotations
-
+import json
+from awt_parser import AwtParser, AwtWeatherRecord
 import logging
 import time
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+_TZ_UTC8 = timezone(timedelta(hours=8))
 
 from AI_Analyzer import AnalysisResults, HourlyRiskEntry, VesselParams
 from analysis import WeatherAnalyzer, WeatherParser
@@ -38,7 +24,6 @@ from app_helpers import (
 )
 from models import AnalysisResult, VesselInfo
 from plotting import PlotService, plot_enhanced_timeline
-
 from vessel_windage_db import (
     VESSEL_TYPE_DISPLAY,
     VESSEL_TYPE_KEY_MAP,
@@ -47,6 +32,13 @@ from vessel_windage_db import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ================= 風險閾值常數（必須在所有函式之前定義）=================
+
+_GUST_THR = {"caution": 28.0, "warning": 34.0, "danger": 41.0}
+_WIND_THR = {"caution": 22.0, "warning": 28.0, "danger": 34.0}
+_WAVE_THR = {"caution": 2.5,  "warning": 3.5,  "danger": 4.0}
 
 
 # ================= 私有輔助函式 =================
@@ -65,9 +57,11 @@ def _classify_op_risk(gust_kts: float, wind_kts: float, wave_m: float) -> str:
         if val >= thr["warning"]: return 2
         if val >= thr["caution"]: return 1
         return 0
-    level = max(_tier(gust_kts, _GUST_THR),
-                _tier(wind_kts, _WIND_THR),
-                _tier(wave_m,   _WAVE_THR))
+    level = max(
+        _tier(gust_kts, _GUST_THR),
+        _tier(wind_kts, _WIND_THR),
+        _tier(wave_m,   _WAVE_THR),
+    )
     return ["low", "medium", "high", "extreme"][level]
 
 
@@ -112,22 +106,85 @@ def _build_hourly_risk_entries(df_detail: pd.DataFrame) -> List[HourlyRiskEntry]
         sf = float(row.get("safety_factor", 99.9))
         if sf >= 1.5:
             continue
-
         t_raw = row.get("time", "")
-        if hasattr(t_raw, "strftime"):
-            t_str = t_raw.strftime("%Y-%m-%d %H:%M")
-        else:
-            t_str = str(t_raw)
-
-        entries.append(
-            HourlyRiskEntry(
-                time          = t_str,
-                wind_gust_kts = float(row.get("wind_gust_kts", 0.0)),
-                safety_factor = sf,
-            )
-        )
-
+        t_str = t_raw.strftime("%Y-%m-%d %H:%M") if hasattr(t_raw, "strftime") else str(t_raw)
+        entries.append(HourlyRiskEntry(
+            time          = t_str,
+            wind_gust_kts = float(row.get("wind_gust_kts", 0.0)),
+            safety_factor = sf,
+        ))
     return entries[:20]
+
+
+def _thr_color(val: float, thr: dict) -> str:
+    if val >= thr["danger"]:  return "#B91C1C"
+    if val >= thr["warning"]: return "#B45309"
+    if val >= thr["caution"]: return "#1D4ED8"
+    return "#374151"
+
+
+def _metric_html(label: str, value: str, color: str, note: str = "") -> str:
+    note_html = (
+        f"<div style='font-size:0.75em;color:#6B7280;margin-top:1px'>{note}</div>"
+        if note else ""
+    )
+    return (
+        f"<div style='background:#F9FAFB;border-radius:6px;padding:8px 10px;"
+        f"margin-bottom:6px;border-left:3px solid {color}'>"
+        f"<div style='font-size:0.75em;color:#6B7280'>{label}</div>"
+        f"<div style='font-size:1.1em;font-weight:bold;color:{color}'>{value}</div>"
+        f"{note_html}</div>"
+    )
+
+
+def _wx_zh(codes: list) -> str:
+    _MAP = {
+        "CLR": "晴", "CLOUDY": "多雲", "OVERCAST": "陰", "FOG": "霧",
+        "MIST": "薄霧", "RAIN": "雨", "DRIZZLE": "毛雨", "SNOW": "雪",
+        "THUNDER": "雷暴", "SLEET": "雨夾雪", "HAZE": "霾",
+    }
+    return "、".join(dict.fromkeys(_MAP.get(c, c) for c in codes)) or "N/A"
+
+
+def _wind_type_label(wind_type: str) -> str:
+    return {
+        "offshore": "吹開風", "onshore": "攏風",
+        "parallel": "側風",   "headwind": "逆風", "tailwind": "順風",
+    }.get(wind_type, "未知")
+
+
+def _wind_type_color(wind_type: str) -> str:
+    return {
+        "offshore": "green", "onshore": "red",
+        "parallel": "orange", "headwind": "blue", "tailwind": "blue",
+    }.get(wind_type, "gray")
+
+
+def _wave_period_type(period_s: float) -> str:
+    if period_s <= 0:   return "N/A"
+    if period_s >= 10:  return f"{period_s:.1f}s（長浪/湧浪）"
+    if period_s >= 6:   return f"{period_s:.1f}s（混合浪）"
+    return f"{period_s:.1f}s（風浪）"
+
+
+def _gust_bft_label(gust_kts: float) -> str:
+    if gust_kts >= 64: return "Bft 12 颶風"
+    if gust_kts >= 56: return "Bft 11 暴風"
+    if gust_kts >= 48: return "Bft 10 狂風"
+    if gust_kts >= 41: return "Bft 9 烈風"
+    if gust_kts >= 34: return "Bft 8 大風"
+    if gust_kts >= 28: return "Bft 7 疾風"
+    if gust_kts >= 22: return "Bft 6 強風"
+    if gust_kts >= 17: return "Bft 5 清勁風"
+    return "Bft ≤4 微風"
+
+
+def _sf_status_label(sf: float) -> tuple[str, str]:
+    if sf >= 3.0: return "優良",     "#059669"
+    if sf >= 2.0: return "良好",     "#16A34A"
+    if sf >= 1.7: return "合格",     "#CA8A04"
+    if sf >= 1.0: return "偏低⚠️",  "#DC2626"
+    return "嚴重不足🚨", "#7F1D1D"
 
 
 # ================= 側邊欄 =================
@@ -137,7 +194,6 @@ def render_sidebar(crawler: Any) -> Dict[str, Any]:
         st.title("🚢 IWBDSS Pro")
         st.caption("Integrated Weather & Berthing Decision Support System")
 
-        # ── 1. 港口選擇 ──────────────────────────────────────
         st.header("1. 選擇港口")
         content_to_parse   = None
         selected_port_code = None
@@ -155,20 +211,12 @@ def render_sidebar(crawler: Any) -> Dict[str, Any]:
             col_status, col_update = st.columns([3, 1])
 
             if db_data:
-                # 修正 #U2：防禦性解包，相容舊版 schema（欄位數可能不同）
                 if len(db_data) >= 4:
-                    content  = db_data[0]
-                    t_str    = db_data[1]
-                    _name_en = db_data[2]
-                    _name_zh = db_data[3]
+                    content, t_str = db_data[0], db_data[1]
                 elif len(db_data) >= 2:
-                    content  = db_data[0]
-                    t_str    = db_data[1]
-                    _name_en = _name_zh = ""
+                    content, t_str = db_data[0], db_data[1]
                 else:
-                    content  = db_data[0]
-                    t_str    = "N/A"
-                    _name_en = _name_zh = ""
+                    content, t_str = db_data[0], "N/A"
 
                 col_status.success(f"📅 {t_str}")
                 content_to_parse = content
@@ -185,15 +233,46 @@ def render_sidebar(crawler: Any) -> Dict[str, Any]:
                     else:
                         st.error(f"❌ {msg}")
 
-        # ── 氣象資料解析 ─────────────────────────────────────
-        if content_to_parse:
-            _parse_weather_content(
-                content_to_parse, p_name, selected_port_code, crawler
-            )
+            if content_to_parse:
+                parse_result = _parse_weather_content(
+                    content   = content_to_parse,
+                    port_code = selected_port_code or "",
+                )
 
-        st.markdown("---")
+                if parse_result is not None:
+                    if isinstance(parse_result, tuple) and len(parse_result) == 3:
+                        _port_name, wind_records, cond_records = parse_result
+                        if wind_records:
+                            try:
+                                analyzer = WeatherAnalyzer(
+                                    data            = wind_records,
+                                    port_name       = _port_name or p_name or "",
+                                    port_risk_level = 5,
+                                )
+                                analyzer.conditions = cond_records
+                                st.session_state["analyzer"] = analyzer
+                            except Exception as e:
+                                logger.warning("WeatherAnalyzer 初始化失敗: %s", e, exc_info=True)
+                                st.warning("⚠️ 氣象資料載入失敗，請重新下載")
+                    else:
+                        try:
+                            if isinstance(parse_result, (list, tuple)) and len(parse_result) >= 2:
+                                wind_records = parse_result[0]
+                                cond_records = parse_result[1] if len(parse_result) > 1 else []
+                            else:
+                                wind_records = parse_result
+                                cond_records = []
 
-        # ── 2. 參數設定 ──────────────────────────────────────
+                            analyzer = WeatherAnalyzer(
+                                data       = wind_records,
+                                port_name  = p_name or "",
+                            )
+                            analyzer.conditions = cond_records
+                            st.session_state["analyzer"] = analyzer
+                        except Exception as e:
+                            logger.warning("WeatherAnalyzer（舊格式）初始化失敗: %s", e, exc_info=True)
+                            st.warning("⚠️ 氣象資料載入失敗，請重新下載")
+
         st.header("2. 參數設定")
         min_t = max_t = datetime.now()
         if st.session_state.get("analyzer"):
@@ -215,16 +294,10 @@ def render_sidebar(crawler: Any) -> Dict[str, Any]:
             format_func=lambda x: "左靠 (Port)" if x == "port" else "右靠 (Stbd)",
         )
 
-        # ── ⚓ 船舶細節 ───────────────────────────────────────
         with st.expander("⚓ 船舶細節", expanded=True):
-
-            type_options = list(VESSEL_TYPE_DISPLAY.values()) + ["手動輸入"]
-            vessel_type_display = st.selectbox(
-                "船型",
-                options=type_options,
-                help="選擇船型後，系統將依吃水自動帶入受風面積",
-            )
-            vessel_type_key = VESSEL_TYPE_KEY_MAP.get(vessel_type_display)
+            type_options        = list(VESSEL_TYPE_DISPLAY.values()) + ["手動輸入"]
+            vessel_type_display = st.selectbox("船型", options=type_options)
+            vessel_type_key     = VESSEL_TYPE_KEY_MAP.get(vessel_type_display)
 
             draft_b = st.number_input("船艏吃水 (m)", 0.0, 20.0, 11.0, 0.1)
             draft_s = st.number_input("船艉吃水 (m)", 0.0, 20.0, 10.0, 0.1)
@@ -234,10 +307,7 @@ def render_sidebar(crawler: Any) -> Dict[str, Any]:
                 lookup = lookup_windage_area(vessel_type_key, draft_b, draft_s)
                 if lookup:
                     auto_area = lookup.windage_area
-                    st.success(
-                        f"📐 自動帶入受風面積：**{auto_area:,.0f} m²**\n\n"
-                        f"🔍 {lookup.method}"
-                    )
+                    st.success(f"📐 自動帶入受風面積：**{auto_area:,.0f} m²**\n\n🔍 {lookup.method}")
                     with st.expander("🔎 查看前 3 近候選紀錄", expanded=False):
                         for i, cand in enumerate(lookup.candidates, 1):
                             st.caption(
@@ -255,43 +325,28 @@ def render_sidebar(crawler: Any) -> Dict[str, Any]:
 
             area = st.number_input(
                 "受風面積 (m²)",
-                min_value  = 100.0,
-                max_value  = 20000.0,
-                value      = float(auto_area) if auto_area is not None else 9000.0,
-                step       = 100.0,
-                help       = "已根據船型與吃水自動帶入，可直接手動覆蓋",
+                min_value = 100.0, max_value = 20000.0,
+                value     = float(auto_area) if auto_area is not None else 9000.0,
+                step      = 100.0,
             )
 
-            tc1, tc2 = st.columns(2)
+            tc1, tc2  = st.columns(2)
             tug_count = tc1.number_input("拖船數量", 0, 10, 2)
             tug_hp    = tc2.number_input("拖船馬力 (HP)", 0, 10000, 4000, 100)
 
-            cd = st.slider(
-                "風阻係數 Cd",
-                min_value=0.5, max_value=1.5, value=1.0, step=0.05,
-                help=(
-                    "OCIMF MEG4 建議值（橫向 90° 受風）：\n"
-                    "• 貨櫃船（高舷側）：1.0–1.3\n"
-                    "• 散裝船 / 油輪：0.8–1.1\n"
-                    "• 滾裝船：1.1–1.3\n"
-                    "正側風（90°）時 Cd 最大；首尾向風時有效風阻面積改為甲板側面積"
-                ),
-            )
+            cd = st.slider("風阻係數 Cd", min_value=0.5, max_value=1.5, value=1.0, step=0.05)
 
-        # ── 拖船建議提示 ─────────────────────────────────────
         _analyzer = st.session_state.get("analyzer")
         if _analyzer and hasattr(_analyzer, "data") and _analyzer.data:
-            _max_gust = max((r.wind_gust for r in _analyzer.data), default=0)
+            _max_gust = max(
+                (getattr(r, "wind_gust_kts", None) or getattr(r, "wind_gust", 0.0) or 0.0
+                 for r in _analyzer.data),
+                default=0,
+            )
             if _max_gust >= 41:
-                st.warning(
-                    f"⚠️ 氣象資料中最大陣風達 **{_max_gust:.0f} kts（Bft 9+）**，"
-                    "建議安排 **≥ 2 艘**拖船候命，靠離泊期間維持頂推。"
-                )
+                st.warning(f"⚠️ 氣象資料中最大陣風達 **{_max_gust:.0f} kts（Bft 9+）**，建議安排 **≥ 2 艘**拖船候命。")
             elif _max_gust >= 34:
-                st.info(
-                    f"💡 氣象資料中最大陣風達 **{_max_gust:.0f} kts（Bft 8）**，"
-                    "建議安排 **1–2 艘**拖船就位，大風時段維持船側候命。"
-                )
+                st.info(f"💡 氣象資料中最大陣風達 **{_max_gust:.0f} kts（Bft 8）**，建議安排 **1–2 艘**拖船就位。")
 
         with st.expander("🔗 纜繩配置", expanded=True):
             mbs = st.number_input("MBL (kN)", 100.0, 2000.0, 1000.0, 50.0)
@@ -304,12 +359,9 @@ def render_sidebar(crawler: Any) -> Dict[str, Any]:
             st.info(f"📊 總纜繩數: **{bh + bs + sh + ss}** 條")
 
         st.markdown("---")
-
-        # ── AI 設定 ───────────────────────────────────────────
         st.subheader("🤖 AI 決策輔助")
         enable_ai = st.checkbox("啟用 AI 分析", value=True)
         ai_mode   = st.radio("分析模式", ["快速摘要", "完整分析"]) if enable_ai else None
-
         st.markdown("---")
 
         btn_analyze = st.button(
@@ -318,83 +370,113 @@ def render_sidebar(crawler: Any) -> Dict[str, Any]:
             disabled=not st.session_state.get("analyzer"),
             use_container_width=True,
         )
-
         if not st.session_state.get("analyzer"):
             st.info("💡 請先選擇港口並載入氣象資料")
 
     return {
-        "arrival":    arrival,    "departure":  departure,
-        "berth_dir":  berth_dir,  "side":       side,
-        "draft_b":    draft_b,    "draft_s":    draft_s,
-        "area":       area,       "tug_hp":     tug_hp,
-        "tug_count":  tug_count,  "cd":         cd,    "mbs": mbs,
-        "bh":         bh,         "bs":         bs,
-        "sh":         sh,         "ss":         ss,
-        "enable_ai":  enable_ai,  "ai_mode":    ai_mode,
+        "arrival": arrival, "departure": departure,
+        "berth_dir": berth_dir, "side": side,
+        "draft_b": draft_b, "draft_s": draft_s,
+        "area": area, "tug_hp": tug_hp,
+        "tug_count": tug_count, "cd": cd, "mbs": mbs,
+        "bh": bh, "bs": bs, "sh": sh, "ss": ss,
+        "enable_ai": enable_ai, "ai_mode": ai_mode,
         "btn_analyze": btn_analyze,
         "vessel_type_display": vessel_type_display,
         "vessel_type_key":     vessel_type_key,
     }
 
 
-def _parse_weather_content(
-    content: str,
-    p_name: Optional[str],
-    port_code: Optional[str],
-    crawler: Any,
-) -> None:
-    """
-    解析氣象內容並寫入 session_state。
+def _parse_weather_content(content: str, port_code: str = "") -> Optional[Any]:
+    if not content:
+        return None
 
-    修正：移除 max_hours=None（analysis.WeatherParser.parse_content 無此參數），
-    直接呼叫 parse_content(content)。
-    """
-    import traceback as _tb
+    stripped = content.strip()
 
-    # ── 防禦：content 為空時提早結束 ─────────────────────────
-    if not content or not content.strip():
-        st.warning("⚠️ 氣象資料內容為空，請重新下載")
-        st.session_state.analyzer = None
-        return
+    if stripped.startswith('[') or stripped.startswith('{'):
+        try:
+            raw_list = json.loads(stripped)
+            if not isinstance(raw_list, list):
+                raw_list = [raw_list]
 
-    parser = WeatherParser()
+            for rec in raw_list:
+                for key in ('time', 'lct_time'):
+                    val = rec.get(key)
+                    if isinstance(val, str):
+                        try:
+                            dt = datetime.fromisoformat(val)
+                            if dt.tzinfo is not None:
+                                dt = dt.astimezone(_TZ_UTC8).replace(tzinfo=None)
+                            rec[key] = dt
+                        except ValueError:
+                            pass
+
+            from models import WeatherRecord
+            wind_records, cond_records = [], []
+
+            for rec in raw_list:
+                t = rec.get('time')
+                if not isinstance(t, datetime):
+                    continue
+                if t.tzinfo is not None:
+                    t = t.replace(tzinfo=None)
+
+                wind_records.append(WeatherRecord(
+                    time           = t,
+                    wind_direction = str(rec.get('wind_direction', 'N')),
+                    wind_speed     = float(rec.get('wind_speed_kts', 0.0) or 0.0),
+                    wind_gust      = float(rec.get('wind_gust_kts',  0.0) or 0.0),
+                    wave_direction = str(rec.get('wave_direction', 'N')),
+
+                    # ✅ 優先取 pilot sigWaveHeight，fallback 到 port sigWaveHeight
+                    wave_height    = float(
+                        rec.get('pilot_wave_height_m') or
+                        rec.get('wave_height') or 0.0
+                    ),
+                    wave_max       = float(
+                        rec.get('pilot_wave_max_m') or
+                        rec.get('wave_max') or 0.0
+                    ),
+                    wave_period    = float(
+                        rec.get('pilot_swell_period_s') or
+                        rec.get('wave_period') or 0.0
+                    ),
+                ))
+
+                # ✅ cond_records 同時保留 port 與 pilot 波高，供 UI 對比顯示
+                cond_records.append({
+                    **rec,
+                    # 明確標記兩個來源的波高
+                    'port_wave_height_m':  float(rec.get('wave_height',         0.0) or 0.0),
+                    'pilot_wave_height_m': float(rec.get('pilot_wave_height_m', 0.0) or 0.0),
+                    'port_wave_max_m':     float(rec.get('wave_max',            0.0) or 0.0),
+                    'pilot_wave_max_m':    float(rec.get('pilot_wave_max_m',    0.0) or 0.0),
+                })
+
+            if not wind_records:
+                logger.warning("JSON 解析後無有效記錄（port=%s）", port_code)
+                return None
+
+            logger.info("✅ DB JSON → WeatherRecord 轉換成功（port=%s，%d 筆）", port_code, len(wind_records))
+            return (port_code, wind_records, cond_records)
+
+        except Exception as e:
+            logger.warning("AWT JSON 解析失敗（port=%s）: %s", port_code, e, exc_info=True)
+            return None
+
     try:
-        # 直接呼叫，不傳 max_hours（analysis.py 無此參數）
-        p_parsed_name, data, conditions, warns = parser.parse_content(content)
-        final_name = p_name or p_parsed_name
-
-        if port_code:
-            st.session_state.port_info = get_port_full_info(port_code, crawler)
-
-        st.session_state.analyzer = WeatherAnalyzer(final_name, data, conditions=conditions)
-        st.success(f"✅ 已載入 {len(data)} 筆氣象資料")
-
-        if warns:
-            with st.expander(f"⚠️ 解析警告 ({len(warns)})"):
-                for w in warns:
-                    st.warning(w)
-
-    except ValueError as exc:
-        # parse_content 找不到 WIND 區段，或無法解析任何記錄
-        st.error(f"❌ 氣象資料格式錯誤：{exc}")
-        st.caption("請確認資料包含 'WIND kts' 區段，並重新下載。")
-        logger.warning("氣象資料解析 ValueError（port_code=%s）: %s", port_code, exc)
-        st.session_state.analyzer = None
-
-    except Exception as exc:
-        # 其他未預期錯誤，顯示完整 traceback 供診斷
-        st.error(f"❌ 解析失敗：{type(exc).__name__}: {exc}")
-        with st.expander("🔍 完整錯誤訊息（診斷用）"):
-            st.code(_tb.format_exc(), language="text")
-        logger.exception("氣象資料解析失敗（port_code=%s）", port_code)
-        st.session_state.analyzer = None
+        parser = WeatherParser()
+        return parser.parse_content(content)
+    except Exception as e:
+        logger.warning("WeatherParser 解析失敗（port_code=%s）: %s", port_code, e, exc_info=True)
+        return None
 
 
 # ================= 港口資訊卡片 =================
 
 def render_port_info(
     port_info: Optional[PortDisplayInfo],
-    analyzer: Optional[WeatherAnalyzer],
+    analyzer:  Optional[WeatherAnalyzer],
 ) -> None:
     has_valid_info = (
         port_info is not None
@@ -405,11 +487,10 @@ def render_port_info(
     )
 
     if has_valid_info:
-        name    = getattr(port_info, "port_name",  None) or (port_info.get("port_name",  "") if isinstance(port_info, dict) else "")
-        code    = getattr(port_info, "port_code",  None) or (port_info.get("port_code",  "") if isinstance(port_info, dict) else "")
-        country = getattr(port_info, "country",    None) or (port_info.get("country",    "") if isinstance(port_info, dict) else "")
-        lat_ns  = getattr(port_info, "lat_ns",     None) or (port_info.get("lat_ns",     "") if isinstance(port_info, dict) else "")
-        lon_ew  = getattr(port_info, "lon_ew",     None) or (port_info.get("lon_ew",     "") if isinstance(port_info, dict) else "")
+        def _g(attr, fallback=""):
+            return getattr(port_info, attr, None) or (port_info.get(attr, fallback) if isinstance(port_info, dict) else fallback)
+        name, code, country = _g("port_name"), _g("port_code"), _g("country")
+        lat_ns, lon_ew      = _g("lat_ns"), _g("lon_ew")
     else:
         name    = getattr(analyzer, "port_name", "Unknown Port") if analyzer else "Unknown Port"
         code = country = lat_ns = lon_ew = ""
@@ -428,8 +509,8 @@ def render_port_info(
 
     coord_str = f"{lat_ns} / {lon_ew}" if lat_ns and lon_ew else "N/A"
     items = [
-        ("Port Code", code,       country.upper() if country else ""),
-        ("Coordinates", coord_str, "Lat / Lon"),
+        ("Port Code",    code,       country.upper() if country else ""),
+        ("Coordinates",  coord_str,  "Lat / Lon"),
     ]
     cols_html = "".join(
         f"<div style='text-align:center;padding:10px 0;"
@@ -445,8 +526,7 @@ def render_port_info(
         f"padding:20px 32px;border-radius:14px;margin:6px 0 14px;color:white;"
         f"box-shadow:0 4px 20px rgba(79,70,229,0.35);'>"
         f"<div style='display:grid;grid-template-columns:repeat(2,1fr);gap:0'>"
-        f"{cols_html}"
-        f"</div></div>",
+        f"{cols_html}</div></div>",
         unsafe_allow_html=True,
     )
 
@@ -486,12 +566,10 @@ def render_kpi_metrics(result: AnalysisResult) -> None:
     bow_status  = result.mooring_split.bow.status
     delta_color = "normal" if bow_status == "OK" else "inverse"
     risk_delta  = result.risk_score - result.mitigated_risk_score
-
-    risk_spec  = RISK_LEVEL_SPECS.get(result.risk_level, RISK_LEVEL_SPECS["low"])
-    risk_label = risk_spec.label
+    risk_spec   = RISK_LEVEL_SPECS.get(result.risk_level, RISK_LEVEL_SPECS["low"])
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("綜合風險評分", f"{result.risk_score:.1f} / 100", risk_label,         delta_color="inverse")
+    k1.metric("綜合風險評分", f"{result.risk_score:.1f} / 100", risk_spec.label,        delta_color="inverse")
     k2.metric("緩解後風險",   f"{result.mitigated_risk_score:.1f}", f"降幅 {risk_delta:.1f}")
     k3.metric("最大受力",     f"{max_force_N / 1000:.0f} kN",       f"SF {sf:.2f}")
     k4.metric("繫泊狀態",     bow_status,                            delta_color=delta_color)
@@ -517,89 +595,39 @@ def render_kpi_metrics(result: AnalysisResult) -> None:
         f"<div style='background:{risk_spec.color_bg};border-left:6px solid {risk_spec.color_hex};"
         f"padding:14px 18px;border-radius:8px;margin-top:10px'>"
         f"<div style='font-weight:700;color:{risk_spec.color_hex};font-size:1em;margin-bottom:10px'>"
-        f"{icon} {title}</div>"
-        f"{steps_html}"
-        f"</div>",
+        f"{icon} {title}</div>{steps_html}</div>",
         unsafe_allow_html=True,
     )
 
 
 # ================= 靠離泊作業建議 =================
 
-def _wind_type_label(wind_type: str) -> str:
-    return {
-        "offshore": "吹開風",
-        "onshore":  "攏風",
-        "parallel": "側風",
-        "headwind": "逆風",
-        "tailwind": "順風",
-    }.get(wind_type, "未知")
-
-
-def _wind_type_color(wind_type: str) -> str:
-    return {
-        "offshore": "green",
-        "onshore":  "red",
-        "parallel": "orange",
-        "headwind": "blue",
-        "tailwind": "blue",
-    }.get(wind_type, "gray")
-
-
-def _wave_period_type(period_s: float) -> str:
-    if period_s <= 0:
-        return "N/A"
-    if period_s >= 10:
-        return f"{period_s:.1f}s（長浪/湧浪）"
-    if period_s >= 6:
-        return f"{period_s:.1f}s（混合浪）"
-    return f"{period_s:.1f}s（風浪）"
-
-
-_GUST_THR  = {"caution": 28.0, "warning": 34.0, "danger": 41.0}
-_WIND_THR  = {"caution": 22.0, "warning": 28.0, "danger": 34.0}
-_WAVE_THR  = {"caution": 2.5,  "warning": 3.5,  "danger": 4.0}
-
-
-def _thr_color(val: float, thr: dict) -> str:
-    if val >= thr["danger"]:  return "#B91C1C"
-    if val >= thr["warning"]: return "#B45309"
-    if val >= thr["caution"]: return "#1D4ED8"
-    return "#374151"
-
-
-def _metric_html(label: str, value: str, color: str, note: str = "") -> str:
-    note_html = f"<div style='font-size:0.75em;color:#6B7280;margin-top:1px'>{note}</div>" if note else ""
-    return (
-        f"<div style='background:#F9FAFB;border-radius:6px;padding:8px 10px;"
-        f"margin-bottom:6px;border-left:3px solid {color}'>"
-        f"<div style='font-size:0.75em;color:#6B7280'>{label}</div>"
-        f"<div style='font-size:1.1em;font-weight:bold;color:{color}'>{value}</div>"
-        f"{note_html}</div>"
-    )
-
-
-def _wx_zh(codes: list) -> str:
-    _MAP = {"CLR": "晴", "CLOUDY": "多雲", "OVERCAST": "陰", "FOG": "霧",
-            "MIST": "薄霧", "RAIN": "雨", "DRIZZLE": "毛雨", "SNOW": "雪",
-            "THUNDER": "雷暴", "SLEET": "雨夾雪", "HAZE": "霾"}
-    return "、".join(dict.fromkeys(_MAP.get(c, c) for c in codes)) or "N/A"
-
-
 def _render_op_col(col, window, label: str, op_time, header_color: str) -> None:
     with col:
-        is_night = op_time.hour >= 20 or op_time.hour < 6
+        is_night  = op_time.hour >= 20 or op_time.hour < 6
         night_tag = " 🌙" if is_night else ""
+
+        # ✅ 若有實際資料時間，顯示資料時間
+        ws = getattr(window, "window_start", None) if window is not None else None
+        display_time = ws if ws is not None else op_time
+
         st.markdown(
             f"<div style='background:{header_color};color:#fff;padding:8px 12px;"
             f"border-radius:8px 8px 0 0;font-weight:bold;font-size:1em'>"
             f"{label}{night_tag}"
             f"<span style='font-weight:normal;font-size:0.85em;margin-left:8px;opacity:0.9'>"
-            f"{op_time.strftime('%m/%d %H:%M')}</span></div>",
+            f"{display_time.strftime('%m/%d %H:%M')}</span></div>",
             unsafe_allow_html=True,
         )
 
-        if window is None or not getattr(window, "has_data", False):
+        risks_list = getattr(window, "risks", None) if window is not None else None
+        no_data = (
+            window is None
+            or risks_list is None
+            or risks_list == ["無該時段氣象資料"]
+        )
+
+        if no_data:
             st.markdown(
                 "<div style='background:#F3F4F6;border-radius:0 0 8px 8px;"
                 "padding:16px;text-align:center;color:#9CA3AF'>無該時段氣象資料</div>",
@@ -607,6 +635,7 @@ def _render_op_col(col, window, label: str, op_time, header_color: str) -> None:
             )
             return
 
+        # ── 其餘顯示邏輯不變 ──
         max_gust   = getattr(window, "max_wind_gust",      0.0) or 0.0
         max_dir    = getattr(window, "max_wind_direction",  "")
         hr_hours   = getattr(window, "high_risk_hours",     0)  or 0
@@ -615,44 +644,55 @@ def _render_op_col(col, window, label: str, op_time, header_color: str) -> None:
         avg_temp   = getattr(window, "avg_temp",            None)
         min_vis_m  = getattr(window, "min_vis_m",           None)
         wx_codes   = getattr(window, "weather_codes",       [])
-        ws         = getattr(window, "window_start",        None)
         we         = getattr(window, "window_end",          None)
         wt         = getattr(window, "dominant_wind_type",  "")
-        all_risks  = list(getattr(window, "risks", [])) + list(getattr(window, "condition_risks", []))
+        all_risks  = list(risks_list) + list(getattr(window, "condition_risks", []))
 
         body_parts = []
 
         wt_label = _wind_type_label(wt)
         wt_color = _wind_type_color(wt)
-        wt_icon  = {"offshore": "⬆", "onshore": "⬇", "headwind": "⬅", "tailwind": "➡", "parallel": "↔"}.get(wt, "↔")
+        wt_icon  = {
+            "offshore": "⬆", "onshore": "⬇",
+            "headwind": "⬅", "tailwind": "➡", "parallel": "↔"
+        }.get(wt, "↔")
         body_parts.append(
             f"<div style='background:{wt_color}18;border:1px solid {wt_color}44;"
             f"border-radius:4px;padding:4px 8px;margin-bottom:8px;display:inline-block;"
-            f"color:{wt_color};font-weight:bold;font-size:0.9em'>"
-            f"{wt_icon} {wt_label}</div>"
+            f"color:{wt_color};font-weight:bold;font-size:0.9em'>{wt_icon} {wt_label}</div>"
         )
 
         if ws and we:
             body_parts.append(
                 f"<div style='font-size:0.75em;color:#6B7280;margin-bottom:6px'>"
-                f"⏱ 時窗 {ws.strftime('%H:%M')}–{we.strftime('%H:%M')}</div>"
+                f"⏱ 資料時窗 {ws.strftime('%m/%d %H:%M')}–{we.strftime('%m/%d %H:%M')}</div>"
             )
 
         gust_color = _thr_color(max_gust, _GUST_THR)
-        gust_note  = f"↑ {max_dir}" if max_dir else ""
-        body_parts.append(_metric_html("最大陣風", f"{max_gust:.1f} kts", gust_color, gust_note))
+        body_parts.append(_metric_html(
+            "最大陣風", f"{max_gust:.1f} kts", gust_color,
+            f"↑ {max_dir}" if max_dir else ""
+        ))
 
-        risk_color = "#B91C1C" if hr_hours >= 6 else "#B45309" if hr_hours >= 3 else "#1D4ED8" if hr_hours >= 1 else "#374151"
+        risk_color = (
+            "#B91C1C" if hr_hours >= 6 else
+            "#B45309" if hr_hours >= 3 else
+            "#1D4ED8" if hr_hours >= 1 else "#374151"
+        )
         body_parts.append(_metric_html("高風險時段", f"{hr_hours} 小時", risk_color))
 
         wave_color = _thr_color(max_wave, _WAVE_THR)
-        wave_note  = _wave_period_type(max_period) if max_period > 0 else ""
-        body_parts.append(_metric_html("最大浪高", f"{max_wave:.1f} m", wave_color, wave_note))
+        body_parts.append(_metric_html(
+            "最大浪高", f"{max_wave:.1f} m", wave_color,
+            _wave_period_type(max_period) if max_period > 0 else ""
+        ))
 
         if avg_temp is not None:
             temp_color = "#B45309" if avg_temp < 5 else "#374151"
-            temp_note  = "⚠ 低溫警示" if avg_temp < 5 else ""
-            body_parts.append(_metric_html("平均氣溫", f"{avg_temp:.1f}°C", temp_color, temp_note))
+            body_parts.append(_metric_html(
+                "平均氣溫", f"{avg_temp:.1f}°C", temp_color,
+                "⚠ 低溫警示" if avg_temp < 5 else ""
+            ))
 
         if min_vis_m is not None:
             vis_str   = f"{min_vis_m/1000:.1f} km" if min_vis_m >= 1000 else f"{int(min_vis_m)} m"
@@ -677,23 +717,139 @@ def _render_op_col(col, window, label: str, op_time, header_color: str) -> None:
         )
 
 
+def _build_window_from_analyzer(
+    analyzer: Any,
+    target_time: datetime,
+    window_hours: int = 2,
+) -> Any:
+    """
+    從 analyzer.data 建立時窗結果。
+    找不到精確時窗時，取時間距離最近的 3 筆作為 fallback。
+    波高優先使用 pilotForecast（pilot_wave_height_m）。
+    """
+    from datetime import timedelta as _td
+
+    start  = target_time - _td(hours=window_hours)
+    end    = target_time + _td(hours=window_hours)
+    window = [r for r in analyzer.data if start <= r.time <= end]
+
+    # ── Fallback：找不到精確時窗時取最近 3 筆 ────────────────────────
+    if not window:
+        sorted_by_dist = sorted(
+            analyzer.data,
+            key=lambda r: abs((r.time - target_time).total_seconds()),
+        )
+        window = sorted_by_dist[:3]
+
+        if not window:
+            class _NoData:
+                risks = ["無該時段氣象資料"]
+            return _NoData()
+
+        _is_fallback = True
+    else:
+        _is_fallback = False
+
+    # ── 計算最大值 ────────────────────────────────────────────────────
+    max_gust_rec = max(window, key=lambda r: r.wind_gust)
+
+    # ✅ 優先用 pilot_wave_height_m，fallback 到 wave_height
+    max_wave_rec = max(
+        window,
+        key=lambda r: (getattr(r, 'pilot_wave_height_m', None) or r.wave_height),
+    )
+
+    max_gust = max_gust_rec.wind_gust
+
+    # ✅ pilot 波高（主要顯示值）
+    max_wave = (
+        getattr(max_wave_rec, 'pilot_wave_height_m', None)
+        or max_wave_rec.wave_height
+    )
+
+    # ✅ port 波高（對比用）
+    max_wave_port = max_wave_rec.wave_height
+
+    max_period  = max((r.wave_period for r in window), default=0.0)
+    high_risk_h = sum(1 for r in window if r.wind_gust >= 35.0)
+
+    # ── 主要風型 ──────────────────────────────────────────────────────
+    try:
+        from app_helpers import compass_to_degrees
+        wind_deg = compass_to_degrees(max_gust_rec.wind_direction)
+    except Exception:
+        _COMPASS = {
+            'N': 0, 'NNE': 22.5, 'NE': 45, 'ENE': 67.5,
+            'E': 90, 'ESE': 112.5, 'SE': 135, 'SSE': 157.5,
+            'S': 180, 'SSW': 202.5, 'SW': 225, 'WSW': 247.5,
+            'W': 270, 'WNW': 292.5, 'NW': 315, 'NNW': 337.5,
+        }
+        wind_deg = _COMPASS.get(max_gust_rec.wind_direction, 0.0)
+
+    relative = (wind_deg - 0 + 180) % 360 - 180
+    abs_rel  = abs(relative)
+    if 45 <= abs_rel <= 135:
+        dom_wind_type = "offshore" if relative > 0 else "onshore"
+    else:
+        dom_wind_type = "parallel"
+
+    # ── 風險列表 ──────────────────────────────────────────────────────
+    risks: list[str] = []
+    if _is_fallback:
+        nearest_time = window[0].time
+        diff_h = abs((nearest_time - target_time).total_seconds()) / 3600
+        risks.append(f"⚠️ 無精確時窗資料，以最近一筆（差距 {diff_h:.1f}h）估算")
+    if max_gust >= 35.0:
+        risks.append(f"前後{window_hours}H內有強陣風 ({max_gust:.1f} kts)")
+    if max_wave >= 2.5:
+        risks.append(f"前後{window_hours}H內有大浪 ({max_wave:.1f} m)")
+
+    # ── 建立結果物件 ──────────────────────────────────────────────────
+    class _WindowResult:
+        pass
+
+    w = _WindowResult()
+    w.risks               = risks
+    w.max_wind_gust       = max_gust
+    w.max_wind_direction  = max_gust_rec.wind_direction
+    w.max_wave_height     = max_wave           # pilotForecast 波高
+    w.max_wave_height_port = max_wave_port     # portForecast 波高（對比用）
+    w.max_wave_period     = max_period
+    w.high_risk_hours     = high_risk_h
+    w.window_start        = window[0].time
+    w.window_end          = window[-1].time
+    w.dominant_wind_type  = dom_wind_type
+    w.condition_risks     = []
+    return w
+
 def render_berthing_advisory(
-    result: AnalysisResult,
-    vessel: VesselInfo,
+    result:   AnalysisResult,
+    vessel:   VesselInfo,
     analyzer: Optional[Any] = None,
 ) -> None:
-    arr = getattr(result, "arr_window_result", None)
-    dep = getattr(result, "dep_window_result", None)
+    """
+    渲染靠離泊作業建議三欄。
 
-    if arr is None and dep is None:
-        return
-
+    ✅ 修正重點：
+      - AnalysisResult 沒有 arr_window_result / dep_window_result 屬性
+      - 改為直接從 analyzer.data 重新計算時窗（_build_window_from_analyzer）
+      - 在港天氣改用 analyzer.data 中在港期間的統計，不依賴不存在的方法
+    """
     st.subheader("⚓ 靠離泊作業建議")
     col_arr, col_dep, col_port = st.columns(3)
 
-    _render_op_col(col_arr, arr, "🚢 靠泊天氣", vessel.arrival_time, "#1E40AF")
-    _render_op_col(col_dep, dep, "⚓ 離泊天氣", vessel.departure_time, "#065F46")
+    # ✅ 從 analyzer 重新計算時窗（而非從 result 讀取不存在的屬性）
+    if analyzer is not None:
+        arr_window = _build_window_from_analyzer(analyzer, vessel.arrival_time)
+        dep_window = _build_window_from_analyzer(analyzer, vessel.departure_time)
+    else:
+        arr_window = None
+        dep_window = None
 
+    _render_op_col(col_arr, arr_window, "🚢 靠泊天氣", vessel.arrival_time,   "#1E40AF")
+    _render_op_col(col_dep, dep_window, "⚓ 離泊天氣", vessel.departure_time, "#065F46")
+
+    # ── 在港天氣欄 ───────────────────────────────────────────
     with col_port:
         st.markdown(
             "<div style='background:#7C3AED;color:#fff;padding:8px 12px;"
@@ -703,44 +859,56 @@ def render_berthing_advisory(
 
         inport_body = []
 
-        if analyzer is not None and getattr(analyzer, "conditions", []):
-            summary = analyzer.inport_condition_summary(vessel)
-            if summary:
-                avg_t = summary.get("avg_temp")
-                min_t = summary.get("min_temp")
-                min_v = summary.get("min_vis_m")
-                avg_v = summary.get("avg_vis_m")
-                wx_c  = summary.get("weather_codes", [])
-                risks = summary.get("condition_risks", [])
+        # ✅ 修正：不呼叫不存在的 inport_condition_summary()
+        #    改為直接從 analyzer.data 篩選在港期間資料做統計
+        if analyzer is not None and hasattr(analyzer, "data") and analyzer.data:
+            try:
+                in_port = [
+                    r for r in analyzer.data
+                    if vessel.arrival_time <= r.time <= vessel.departure_time
+                ]
+                if not in_port:
+                    in_port = analyzer.data  # fallback：用全部資料
 
-                if avg_t is not None:
-                    temp_color = "#B45309" if (min_t is not None and min_t < 5) else "#374151"
-                    temp_note  = f"最低 {min_t:.1f}°C{'  ⚠ 低溫' if min_t < 5 else ''}" if min_t is not None else ""
-                    inport_body.append(_metric_html("平均氣溫", f"{avg_t:.1f}°C", temp_color, temp_note))
+                max_gust_ip = max(r.wind_gust  for r in in_port)
+                max_wave_ip = max(r.wave_height for r in in_port)
+                avg_gust_ip = sum(r.wind_gust  for r in in_port) / len(in_port)
 
-                if min_v is not None:
-                    vis_str   = f"{min_v/1000:.1f} km" if min_v >= 1000 else f"{int(min_v)} m"
-                    vis_color = "#B91C1C" if min_v < 1000 else "#B45309" if min_v < 3000 else "#374151"
-                    vis_note  = ""
-                    if avg_v is not None:
-                        avg_v_str = f"{avg_v/1000:.1f} km" if avg_v >= 1000 else f"{int(avg_v)} m"
-                        vis_note  = f"平均 {avg_v_str}"
-                    inport_body.append(_metric_html("最低能見度", vis_str, vis_color, vis_note))
+                gust_color = _thr_color(max_gust_ip, _GUST_THR)
+                wave_color = _thr_color(max_wave_ip, _WAVE_THR)
 
-                if wx_c:
-                    inport_body.append(_metric_html("天氣概況", _wx_zh(wx_c), "#374151"))
+                inport_body.append(_metric_html(
+                    "最大陣風", f"{max_gust_ip:.1f} kts", gust_color,
+                    f"平均 {avg_gust_ip:.1f} kts",
+                ))
+                inport_body.append(_metric_html(
+                    "最大浪高", f"{max_wave_ip:.1f} m", wave_color,
+                ))
+                inport_body.append(_metric_html(
+                    "氣象資料筆數", f"{len(in_port)} 筆", "#374151",
+                    f"在港期間 {vessel.arrival_time.strftime('%m/%d %H:%M')} ~ {vessel.departure_time.strftime('%m/%d %H:%M')}",
+                ))
 
-                inport_body.append(_metric_html("氣象資料筆數", f"{len(analyzer.conditions)} 筆", "#374151"))
-
-                for risk in risks:
+                # 在港高風險時段
+                hr_h = sum(1 for r in in_port if r.wind_gust >= 35.0)
+                if hr_h > 0:
                     inport_body.append(
                         f"<div style='background:#FFFBEB;border-left:3px solid #B45309;"
                         f"border-radius:4px;padding:5px 8px;margin-top:4px;"
-                        f"font-size:0.82em;color:#B45309'>⚠️ {risk}</div>"
+                        f"font-size:0.82em;color:#B45309'>⚠️ 高風險時段 {hr_h} 小時（陣風≥35 kts）</div>"
                     )
-            else:
+
+                # conditions 額外資料（若有）
+                cond_records = getattr(analyzer, "conditions", [])
+                if cond_records:
+                    inport_body.append(_metric_html(
+                        "氣象條件筆數", f"{len(cond_records)} 筆", "#374151",
+                    ))
+
+            except Exception as e:
+                logger.warning("在港天氣統計失敗: %s", e, exc_info=True)
                 inport_body.append(
-                    "<div style='color:#9CA3AF;font-size:0.9em;text-align:center;padding:8px'>無在港天氣摘要</div>"
+                    "<div style='color:#9CA3AF;font-size:0.9em;text-align:center;padding:8px'>在港天氣統計失敗</div>"
                 )
         else:
             inport_body.append(
@@ -754,63 +922,38 @@ def render_berthing_advisory(
         )
 
     st.markdown("---")
-  # ================= 詳細報告 =================
-
-def _gust_bft_label(gust_kts: float) -> str:
-    if gust_kts >= 64: return "Bft 12 颶風"
-    if gust_kts >= 56: return "Bft 11 暴風"
-    if gust_kts >= 48: return "Bft 10 狂風"
-    if gust_kts >= 41: return "Bft 9 烈風"
-    if gust_kts >= 34: return "Bft 8 大風"
-    if gust_kts >= 28: return "Bft 7 疾風"
-    if gust_kts >= 22: return "Bft 6 強風"
-    if gust_kts >= 17: return "Bft 5 清勁風"
-    return "Bft ≤4 微風"
 
 
-def _sf_status_label(sf: float) -> tuple[str, str]:
-    if sf >= 3.0:  return "優良", "#059669"
-    if sf >= 2.0:  return "良好", "#16A34A"
-    if sf >= 1.7:  return "合格", "#CA8A04"
-    if sf >= 1.0:  return "偏低⚠️", "#DC2626"
-    return "嚴重不足🚨", "#7F1D1D"
-
+# ================= 詳細報告 =================
 
 def render_detail_report(
-    result: AnalysisResult,
+    result:       AnalysisResult,
     sidebar_data: Dict[str, Any],
-    df_detail: Optional[pd.DataFrame] = None,
-    _analyzer: Optional[Any] = None,
+    df_detail:    Optional[pd.DataFrame] = None,
+    _analyzer:    Optional[Any]          = None,
 ) -> None:
-    from datetime import datetime as _dt
+    wfs      = result.wind_force_summary
+    sf       = _get_wfs_value(wfs, "safety_factor",      "safety_factor")
+    trans_N  = _get_wfs_value(wfs, "max_trans_force_N",  "max_trans_force_N")
+    long_N   = _get_wfs_value(wfs, "max_long_force_N",   "max_long_force_N")
+    total_kN = _get_wfs_value(wfs, "total_restraint_kN", "total_restraint_kN")
+    req_kN   = _get_wfs_value(wfs, "required_force_kN",  "required_force_kN")
+    w_type   = (getattr(wfs, "wind_type", None) or (wfs.get("wind_type", "N/A") if isinstance(wfs, dict) else "N/A"))
 
-    wfs       = result.wind_force_summary
-    sf        = _get_wfs_value(wfs, "safety_factor",     "safety_factor")
-    trans_N   = _get_wfs_value(wfs, "max_trans_force_N", "max_trans_force_N")
-    long_N    = _get_wfs_value(wfs, "max_long_force_N",  "max_long_force_N")
-    total_kN  = _get_wfs_value(wfs, "total_restraint_kN","total_restraint_kN")
-    req_kN    = _get_wfs_value(wfs, "required_force_kN", "required_force_kN")
-    w_type    = (getattr(wfs, "wind_type", None)
-                 or (wfs.get("wind_type","N/A") if isinstance(wfs,dict) else "N/A"))
+    wfs_rec  = (wfs.max_gust_record if hasattr(wfs, "max_gust_record") else wfs.get("max_gust_record", {}) if isinstance(wfs, dict) else {})
+    rec_gust = (wfs_rec.get("wind_gust") if isinstance(wfs_rec, dict) else getattr(wfs_rec, "wind_gust", 0.0)) or 0.0
+    rec_wave = (wfs_rec.get("wave_height") if isinstance(wfs_rec, dict) else getattr(wfs_rec, "wave_height", 0.0)) or 0.0
+    rec_time = (wfs_rec.get("time") if isinstance(wfs_rec, dict) else getattr(wfs_rec, "time", None))
 
-    wfs_rec  = (wfs.max_gust_record if hasattr(wfs,"max_gust_record")
-                else wfs.get("max_gust_record",{}) if isinstance(wfs,dict) else {})
-    rec_gust = (wfs_rec.get("wind_gust") if isinstance(wfs_rec,dict)
-                else getattr(wfs_rec,"wind_gust", 0.0)) or 0.0
-    rec_wave = (wfs_rec.get("wave_height") if isinstance(wfs_rec,dict)
-                else getattr(wfs_rec,"wave_height", 0.0)) or 0.0
-    rec_time = (wfs_rec.get("time") if isinstance(wfs_rec,dict)
-                else getattr(wfs_rec,"time", None))
-
-    risk_spec   = RISK_LEVEL_SPECS.get(result.risk_level, RISK_LEVEL_SPECS["low"])
+    risk_spec          = RISK_LEVEL_SPECS.get(result.risk_level, RISK_LEVEL_SPECS["low"])
     sf_label, sf_color = _sf_status_label(sf)
-    bft_label   = _gust_bft_label(rec_gust)
-    arrival     = sidebar_data.get("arrival")
-    departure   = sidebar_data.get("departure")
-    stay_hrs    = ((departure - arrival).total_seconds() / 3600) if (arrival and departure) else 0
+    bft_label          = _gust_bft_label(rec_gust)
+    arrival            = sidebar_data.get("arrival")
+    departure          = sidebar_data.get("departure")
+    stay_hrs           = ((departure - arrival).total_seconds() / 3600) if (arrival and departure) else 0
 
     tug        = result.tug_recommendation
-    final_tugs = _get_tug_value(tug,"final_tug_count","final_tug_count", 0)
+    final_tugs = _get_tug_value(tug, "final_tug_count", "final_tug_count", 0)
     mooring_ok = sf >= 1.7
     tug_ok     = sf >= 1.7
 
@@ -839,7 +982,7 @@ def render_detail_report(
         st.caption("以下指標供公司主管快速掌握作業風險與合規狀態。")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("🎯 風險評分",    f"{result.risk_score:.0f} / 100", risk_spec.label, delta_color="inverse")
-        col2.metric("⚖️ 安全係數 SF", f"{sf:.2f}", sf_label, delta_color="off")
+        col2.metric("⚖️ 安全係數 SF", f"{sf:.2f}",        sf_label,   delta_color="off")
         col3.metric("💨 最大陣風",    f"{rec_gust:.0f} kts", bft_label, delta_color="off")
         col4.metric("⏱️ 在港時長",    f"{stay_hrs:.1f} h",
                     f"ETA {arrival.strftime('%m/%d %H:%M') if arrival else 'N/A'}", delta_color="off")
@@ -866,62 +1009,37 @@ def render_detail_report(
             )
 
     with st.expander("🌬️ 氣象威脅評估（船長）", expanded=True):
-        st.caption("以下數據供船長評估在港期間的天氣風險及操作時機。")
         cw1, cw2, cw3 = st.columns(3)
-        cw1.metric("最大陣風",   f"{rec_gust:.1f} kts",  bft_label)
-        cw2.metric("最大波高",   f"{rec_wave:.2f} m",    "浪高警戒" if rec_wave >= 2.5 else "正常")
+        cw1.metric("最大陣風",    f"{rec_gust:.1f} kts", bft_label)
+        cw2.metric("最大波高",    f"{rec_wave:.2f} m",   "浪高警戒" if rec_wave >= 2.5 else "正常")
         cw3.metric("最大受力時刻", rec_time.strftime('%m/%d %H:%M') if rec_time else "N/A")
 
-        if df_detail is not None and "wind_gust_kts" in df_detail.columns:
-            try:
-                gust_col = pd.to_numeric(df_detail["wind_gust_kts"], errors="coerce")
-                haz_df   = df_detail[gust_col >= 28.0].copy()
-                if not haz_df.empty:
-                    st.markdown("**⚠️ 在港高警戒時段（陣風 ≥28 kts）**")
-                    show_cols = {}
-                    if "time" in haz_df.columns:
-                        show_cols["時間"] = pd.to_datetime(haz_df["time"]).dt.strftime("%m/%d %H:%M")
-                    if "wind_speed_kts" in haz_df.columns:
-                        show_cols["風速(kts)"] = pd.to_numeric(haz_df["wind_speed_kts"], errors="coerce").round(0)
-                    if "wind_gust_kts" in haz_df.columns:
-                        show_cols["陣風(kts)"] = pd.to_numeric(haz_df["wind_gust_kts"], errors="coerce").round(0)
-                    if "wave_sig_m" in haz_df.columns:
-                        show_cols["浪高(m)"] = pd.to_numeric(haz_df["wave_sig_m"], errors="coerce").round(2)
-                    if "safety_factor" in haz_df.columns:
-                        show_cols["SF"] = pd.to_numeric(haz_df["safety_factor"], errors="coerce").round(2)
+        # ✅ 新增：Port vs Pilot 波高對比說明
+        if df_detail is not None:
+            port_wave_col  = pd.to_numeric(df_detail.get("port_wave_height_m",  pd.Series(dtype=float)), errors="coerce")
+            pilot_wave_col = pd.to_numeric(df_detail.get("pilot_wave_height_m", pd.Series(dtype=float)), errors="coerce")
 
-                    disp = pd.DataFrame(show_cols).reset_index(drop=True)
+            if pilot_wave_col.notna().any() and port_wave_col.notna().any():
+                max_port_wave  = port_wave_col.max()
+                max_pilot_wave = pilot_wave_col.max()
+                diff           = max_pilot_wave - max_port_wave
 
-                    def _style_row(row):
-                        g = row.get("陣風(kts)", 0) or 0
-                        if g >= 41:   bg = "#FECACA"
-                        elif g >= 34: bg = "#FED7AA"
-                        elif g >= 28: bg = "#FEF9C3"
-                        else:         bg = ""
-                        return [f"background-color:{bg}" if bg else "" for _ in row]
-
-                    st.dataframe(disp.style.apply(_style_row, axis=1),
-                                 use_container_width=True, hide_index=True)
-                else:
-                    st.success("在港期間陣風均低於警戒值（28 kts），氣象狀況良好。")
-            except Exception:
-                pass
-
-        wt_zh    = _wind_type_label(w_type)
-        wt_color = _wind_type_color(w_type)
-        wt_note  = {
-            "offshore": "吹開風對靠泊安全有利（船舶被風推離碼頭），但對纜繩要求較高。",
-            "onshore":  "攏風（船被風推向碼頭），靠泊易但離泊困難，需注意護舷器壓力。",
-            "headwind": "逆風有助於操船減速，但橫向擾動較大。",
-            "tailwind": "順風助速，靠泊時制動距離增加，注意速度控制。",
-        }.get(w_type, "")
-        if wt_note:
-            st.markdown(
-                f"<div style='background:#EFF6FF;border-left:4px solid {wt_color};"
-                f"border-radius:4px;padding:8px 12px;margin-top:8px;font-size:0.88em'>"
-                f"<b>主要風型：{wt_zh}</b> — {wt_note}</div>",
-                unsafe_allow_html=True,
-            )
+                diff_color = "#B91C1C" if diff > 0.5 else "#B45309" if diff > 0.2 else "#059669"
+                st.markdown(
+                    f"<div style='background:#F0F9FF;border-left:4px solid #0284C7;"
+                    f"border-radius:4px;padding:10px 14px;margin-top:8px;font-size:0.88em'>"
+                    f"<b>🌊 港區 vs 引水點浪高對比</b><br>"
+                    f"<div style='display:flex;gap:24px;margin-top:6px'>"
+                    f"<span>港區（portForecast）最大：<b>{max_port_wave:.2f} m</b></span>"
+                    f"<span>引水點（pilotForecast）最大：<b style='color:{diff_color}'>{max_pilot_wave:.2f} m</b></span>"
+                    f"<span style='color:{diff_color}'>差異：{diff:+.2f} m</span>"
+                    f"</div>"
+                    f"<div style='color:#6B7280;margin-top:4px;font-size:0.82em'>"
+                    f"⚠️ 引水點浪高通常高於港區，代表進港過程中的實際海況。"
+                    f"IWBDSS 分析使用引水點數值（pilotForecast）以確保保守估算。"
+                    f"</div></div>",
+                    unsafe_allow_html=True,
+                )
 
     with st.expander("⚠️ 風險警示與操作建議", expanded=True):
         if result.recommendations:
@@ -973,9 +1091,9 @@ def render_detail_report(
 
         with mc2:
             st.markdown("**🚤 拖船支援**")
-            tug_hp  = sidebar_data.get("tug_hp", 0)
-            bp_ton  = (tug_hp / 100.0) * 1.1
-            bp_kn   = bp_ton * 9.81
+            tug_hp = sidebar_data.get("tug_hp", 0)
+            bp_ton = (tug_hp / 100.0) * 1.1
+            bp_kn  = bp_ton * 9.81
             st.markdown(f"""
 | 項目 | 數值 |
 |------|------|
@@ -990,7 +1108,7 @@ def render_detail_report(
             else:
                 st.warning("⚠️ 建議增加拖船支援")
 
-    with st.expander("🚨 應變觸發條件清單"):
+    with st.expander("🚨 應變觸發條件清單（船長 & 值班官）"):
         st.caption("以下觸發條件應預先告知全體值班人員，並確認應變程序。")
         triggers = [
             ("#D97706", "MEDIUM",   "Bft 7 — 陣風 28–33 kts",
@@ -1028,7 +1146,6 @@ def render_chart_analysis(
     sidebar_data: Dict[str, Any],
 ) -> None:
     ps = PlotService(analyzer)
-
     tab_c1, tab_c2 = st.tabs(["Weather Trend", "Timeline Analysis"])
 
     with tab_c1:
@@ -1042,30 +1159,20 @@ def render_chart_analysis(
         if df_detail is None or len(df_detail) == 0:
             st.info("No detailed weather data available.")
             return
-
         try:
             mbl_kN      = vessel.mbl / 1000.0
             total_lines = vessel.total_mooring_lines
             cap_kN      = mbl_kN * vessel.safety_factor * total_lines
-
-            max_force_N = _get_wfs_value(
-                result.wind_force_summary,
-                "max_gust_force_N", "max_gust_force_N",
-            )
-
+            max_force_N = _get_wfs_value(result.wind_force_summary, "max_gust_force_N", "max_gust_force_N")
             fig_enhanced = plot_enhanced_timeline(
                 df_detail,
                 sidebar_data["arrival"],
                 sidebar_data["departure"],
                 sidebar_data["berth_dir"],
-                vessel_info={
-                    "total_force_N":       max_force_N,
-                    "mooring_capacity_kN": cap_kN,
-                },
+                vessel_info={"total_force_N": max_force_N, "mooring_capacity_kN": cap_kN},
             )
             if fig_enhanced:
                 st.plotly_chart(fig_enhanced, use_container_width=True)
-
         except Exception:
             logger.exception("render_chart_analysis：Plotly 繪圖失敗")
             st.error("❌ 互動式圖表繪製失敗，請查看日誌")
@@ -1086,32 +1193,27 @@ def render_risk_analysis_report(
     from datetime import datetime as _dt
 
     wfs      = result.wind_force_summary
-    trans_N  = _get_wfs_value(wfs, "max_trans_force_N", "max_trans_force_N")
-    long_N   = _get_wfs_value(wfs, "max_long_force_N",  "max_long_force_N")
-    total_kN = _get_wfs_value(wfs, "total_restraint_kN","total_restraint_kN")
-    req_kN   = _get_wfs_value(wfs, "required_force_kN", "required_force_kN")
-    w_type   = (getattr(wfs,"wind_type",None)
-                or (wfs.get("wind_type","N/A") if isinstance(wfs,dict) else "N/A"))
+    trans_N  = _get_wfs_value(wfs, "max_trans_force_N",  "max_trans_force_N")
+    long_N   = _get_wfs_value(wfs, "max_long_force_N",   "max_long_force_N")
+    total_kN = _get_wfs_value(wfs, "total_restraint_kN", "total_restraint_kN")
+    req_kN   = _get_wfs_value(wfs, "required_force_kN",  "required_force_kN")
+    w_type   = (getattr(wfs, "wind_type", None) or (wfs.get("wind_type", "N/A") if isinstance(wfs, dict) else "N/A"))
 
-    wfs_rec  = (wfs.max_gust_record if hasattr(wfs,"max_gust_record")
-                else wfs.get("max_gust_record",{}) if isinstance(wfs,dict) else {})
-    rec_gust = (wfs_rec.get("wind_gust") if isinstance(wfs_rec,dict)
-                else getattr(wfs_rec,"wind_gust",0.0)) or 0.0
-    rec_wave = (wfs_rec.get("wave_height") if isinstance(wfs_rec,dict)
-                else getattr(wfs_rec,"wave_height",0.0)) or 0.0
-    rec_time = (wfs_rec.get("time") if isinstance(wfs_rec,dict)
-                else getattr(wfs_rec,"time",None))
+    wfs_rec  = (wfs.max_gust_record if hasattr(wfs, "max_gust_record") else wfs.get("max_gust_record", {}) if isinstance(wfs, dict) else {})
+    rec_gust = (wfs_rec.get("wind_gust") if isinstance(wfs_rec, dict) else getattr(wfs_rec, "wind_gust", 0.0)) or 0.0
+    rec_wave = (wfs_rec.get("wave_height") if isinstance(wfs_rec, dict) else getattr(wfs_rec, "wave_height", 0.0)) or 0.0
+    rec_time = (wfs_rec.get("time") if isinstance(wfs_rec, dict) else getattr(wfs_rec, "time", None))
 
     arrival   = sidebar_data.get("arrival")
     departure = sidebar_data.get("departure")
-    stay_hrs  = ((departure - arrival).total_seconds()/3600) if (arrival and departure) else 0
-    port_name = getattr(analyzer,"port_name","—") if analyzer else "—"
+    stay_hrs  = ((departure - arrival).total_seconds() / 3600) if (arrival and departure) else 0
+    port_name = getattr(analyzer, "port_name", "—") if analyzer else "—"
     risk_spec = RISK_LEVEL_SPECS.get(result.risk_level, RISK_LEVEL_SPECS["low"])
     bft_label = _gust_bft_label(rec_gust)
     sf_label, sf_color = _sf_status_label(sf)
 
     tug        = result.tug_recommendation
-    final_tugs = _get_tug_value(tug,"final_tug_count","final_tug_count",0)
+    final_tugs = _get_tug_value(tug, "final_tug_count", "final_tug_count", 0)
     mooring_ok = sf >= 1.7
     tug_ok     = sf >= 1.7
 
@@ -1132,7 +1234,6 @@ def render_risk_analysis_report(
         decision_en, decision_zh = "NO-GO", "強烈建議停止或顯著延後作業"
         dec_color, dec_bg = "#7F1D1D", "#FEF2F2"
 
-    # ── 報告標題 ──────────────────────────────────────────────
     st.markdown(
         f"<div style='background:linear-gradient(135deg,#1E3A5F,#2563EB);color:#fff;"
         f"border-radius:10px;padding:20px 24px;margin-bottom:20px'>"
@@ -1142,20 +1243,17 @@ def render_risk_analysis_report(
         f"港口：<b>{port_name}</b> ｜ "
         f"ETA：{arrival.strftime('%Y-%m-%d %H:%M') if arrival else 'N/A'} ｜ "
         f"ETD：{departure.strftime('%Y-%m-%d %H:%M') if departure else 'N/A'} ｜ "
-        f"報告產生時間：{gen_time}"
-        f"</div></div>",
+        f"報告產生時間：{gen_time}</div></div>",
         unsafe_allow_html=True,
     )
 
-    # ── A. 決策結論 ───────────────────────────────────────────
     st.markdown("### A｜決策結論")
     st.markdown(
         f"<div style='background:{dec_bg};border:2px solid {dec_color};"
         f"border-radius:10px;padding:20px 24px;text-align:center'>"
         f"<div style='font-size:2em;font-weight:900;color:{dec_color}'>{decision_en}</div>"
         f"<div style='font-size:1.1em;color:{dec_color};margin-top:4px'>{decision_zh}</div>"
-        f"<div style='margin-top:12px;display:flex;justify-content:center;gap:32px;"
-        f"font-size:0.9em;color:#374151'>"
+        f"<div style='margin-top:12px;display:flex;justify-content:center;gap:32px;font-size:0.9em;color:#374151'>"
         f"<span>風險評分 <b>{result.risk_score:.0f}/100</b></span>"
         f"<span>等級 <b>{risk_spec.label} {risk_spec.name_zh}</b></span>"
         f"<span>SF <b>{sf:.2f}</b> ({sf_label})</span>"
@@ -1165,21 +1263,19 @@ def render_risk_analysis_report(
     )
     st.markdown("")
 
-    # ── B. 關鍵指標儀表板 ─────────────────────────────────────
     st.markdown("### B｜關鍵指標儀表板")
     b1, b2, b3, b4, b5 = st.columns(5)
-    b1.metric("綜合風險", f"{result.risk_score:.0f}/100", risk_spec.label, delta_color="inverse")
-    b2.metric("安全係數 SF", f"{sf:.2f}", sf_label, delta_color="off")
-    b3.metric("最大陣風", f"{rec_gust:.0f} kts", bft_label, delta_color="off")
-    b4.metric("最大波高", f"{rec_wave:.2f} m", "正常" if rec_wave < 2.5 else "⚠️警戒", delta_color="off")
-    b5.metric("在港時長", f"{stay_hrs:.1f} h",
-              f"{int(stay_hrs)}h {int((stay_hrs%1)*60)}m", delta_color="off")
+    b1.metric("綜合風險",   f"{result.risk_score:.0f}/100", risk_spec.label, delta_color="inverse")
+    b2.metric("安全係數 SF", f"{sf:.2f}",          sf_label,   delta_color="off")
+    b3.metric("最大陣風",   f"{rec_gust:.0f} kts", bft_label,  delta_color="off")
+    b4.metric("最大波高",   f"{rec_wave:.2f} m",   "正常" if rec_wave < 2.5 else "⚠️警戒", delta_color="off")
+    b5.metric("在港時長",   f"{stay_hrs:.1f} h",   f"{int(stay_hrs)}h {int((stay_hrs%1)*60)}m", delta_color="off")
 
     gust_status = "ok" if rec_gust < 34 else ("warn" if rec_gust < 41 else "fail")
     comp_items  = [
-        ("OCIMF MEG4 SF ≥ 1.7",        "ok"   if sf >= 1.7  else "fail"),
-        ("Mooring lines adequate",       "ok"   if mooring_ok else "warn"),
-        ("Tug support adequate",         "ok"   if tug_ok     else "warn"),
+        ("OCIMF MEG4 SF ≥ 1.7",                        "ok"   if sf >= 1.7  else "fail"),
+        ("Mooring lines adequate",                       "ok"   if mooring_ok else "warn"),
+        ("Tug support adequate",                         "ok"   if tug_ok     else "warn"),
         (f"Gust within Bft 8 limit\n({rec_gust:.0f} kts)", gust_status),
     ]
     _STATUS_STYLE = {
@@ -1200,13 +1296,11 @@ def render_risk_analysis_report(
         )
 
     st.markdown("---")
-
-    # ── C. 作業資訊摘要 ───────────────────────────────────────
     st.markdown("### C｜作業資訊摘要")
     ci1, ci2 = st.columns(2)
     with ci1:
         st.markdown("**🏢 公司 / 港口**")
-        vt = sidebar_data.get("vessel_type_display","手動輸入")
+        vt = sidebar_data.get("vessel_type_display", "手動輸入")
         st.markdown(f"""
 | 項目 | 內容 |
 |------|------|
@@ -1229,11 +1323,8 @@ def render_risk_analysis_report(
 """)
 
     st.markdown("---")
-
-    # ── D. 氣象威脅分析 ───────────────────────────────────────
     st.markdown("### D｜氣象威脅分析")
-    di1, di2 = st.columns([1, 1])
-
+    di1, di2 = st.columns(2)
     with di1:
         st.markdown("**🌬️ 最惡劣時刻**")
         wt_zh = _wind_type_label(w_type)
@@ -1245,16 +1336,15 @@ def render_risk_analysis_report(
 | 最大受力時刻 | {rec_time.strftime('%m/%d %H:%M') if rec_time else 'N/A'} | — |
 | 主要風型 | {wt_zh} | {'對靠泊有利' if w_type=='offshore' else '⚠️注意攏風' if w_type=='onshore' else '—'} |
 """)
-
     with di2:
         st.markdown("**📊 在港高風險時段**")
         if df_detail is not None and "wind_gust_kts" in df_detail.columns:
             try:
                 gust_s    = pd.to_numeric(df_detail["wind_gust_kts"], errors="coerce")
+                caution_h = int((gust_s >= 28).sum())
                 bft8_h    = int((gust_s >= 34).sum())
                 bft9_h    = int((gust_s >= 41).sum())
                 bft10_h   = int((gust_s >= 48).sum())
-                caution_h = int((gust_s >= 28).sum())
                 st.markdown(f"""
 | 等級 | 小時數 | 影響 |
 |------|--------|------|
@@ -1268,50 +1358,15 @@ def render_risk_analysis_report(
         else:
             st.caption("無逐時數據。")
 
-    if df_detail is not None and "wind_gust_kts" in df_detail.columns:
-        try:
-            gust_col = pd.to_numeric(df_detail["wind_gust_kts"], errors="coerce")
-            haz_mask = gust_col >= 28.0
-            if haz_mask.any():
-                with st.expander(f"🕐 逐時高風險時段明細（陣風≥28 kts，共 {haz_mask.sum()} 筆）"):
-                    haz_df = df_detail[haz_mask].copy()
-                    show = {}
-                    if "time" in haz_df.columns:
-                        show["時間"] = pd.to_datetime(haz_df["time"]).dt.strftime("%m/%d %H:%M")
-                    for src, name, div in [
-                        ("wind_speed_kts","風速(kts)",1),
-                        ("wind_gust_kts","陣風(kts)",1),
-                        ("wave_sig_m","浪高(m)",1),
-                        ("gust_force_N","陣風力(kN)",1000),
-                        ("safety_factor","SF",1),
-                    ]:
-                        if src in haz_df.columns:
-                            col_data = pd.to_numeric(haz_df[src], errors="coerce")
-                            show[name] = (col_data/div).round(2 if div==1 else 0)
-                    disp = pd.DataFrame(show).reset_index(drop=True)
-
-                    def _row_color(row):
-                        g  = row.get("陣風(kts)", 0) or 0
-                        bg = ("#FECACA" if g >= 41 else "#FED7AA" if g >= 34 else "#FEF9C3")
-                        return [f"background-color:{bg}"] * len(row)
-
-                    st.dataframe(disp.style.apply(_row_color, axis=1),
-                                 use_container_width=True, hide_index=True)
-        except Exception:
-            pass
-
     st.markdown("---")
-
-    # ── E. 安全力學評估 ───────────────────────────────────────
     st.markdown("### E｜安全力學評估（OCIMF 方法）")
     ea1, ea2 = st.columns(2)
     with ea1:
         st.markdown("**💨 受力分解**")
-        total_force_kN = max_force_N / 1000.0
         st.markdown(f"""
 | 項目 | 數值 |
 |------|------|
-| 最大總受風力 | **{total_force_kN:.0f} kN** |
+| 最大總受風力 | **{max_force_N/1000:.0f} kN** |
 | 橫向受力（垂直碼頭） | **{trans_N/1000:.0f} kN** |
 | 縱向受力（沿碼頭） | **{long_N/1000:.0f} kN** |
 | 纜繩抗力 | {moor_cap_kN:.0f} kN |
@@ -1324,12 +1379,10 @@ def render_risk_analysis_report(
         margin_pct = (margin / req_kN * 100) if req_kN > 0 else 0
         sf_rows = [
             ("安全係數 SF", f"{sf:.2f}", sf_color),
-            ("安全餘裕",
-             f"{'+' if margin>=0 else ''}{margin:.0f} kN ({margin_pct:+.0f}%)",
+            ("安全餘裕", f"{'+' if margin>=0 else ''}{margin:.0f} kN ({margin_pct:+.0f}%)",
              "#059669" if margin >= 0 else "#DC2626"),
             ("OCIMF MEG4 最低要求", "SF ≥ 1.7", "#374151"),
-            ("本次評估結果",
-             "✅ 符合" if sf >= 1.7 else "❌ 未達標",
+            ("本次評估結果", "✅ 符合" if sf >= 1.7 else "❌ 未達標",
              "#059669" if sf >= 1.7 else "#DC2626"),
         ]
         for label, val, color in sf_rows:
@@ -1342,18 +1395,14 @@ def render_risk_analysis_report(
             )
 
     st.markdown("---")
-
-    # ── F. 繫泊與拖船配置 ─────────────────────────────────────
     st.markdown("### F｜繫泊 & 拖船配置要求")
     fa1, fa2 = st.columns(2)
     with fa1:
         st.markdown("**🪢 纜繩配置**")
         mbl_kn = sidebar_data.get("mbs", 0)
         wll_kn = mbl_kn * 0.33
-        bh = sidebar_data.get("bh", 0)
-        bs = sidebar_data.get("bs", 0)
-        sh = sidebar_data.get("sh", 0)
-        ss = sidebar_data.get("ss", 0)
+        bh = sidebar_data.get("bh", 0); bs = sidebar_data.get("bs", 0)
+        sh = sidebar_data.get("sh", 0); ss = sidebar_data.get("ss", 0)
         st.markdown(f"""
 | 位置 | 頭纜/尾纜 | 倒纜 | 小計 |
 |------|-----------|------|------|
@@ -1378,28 +1427,23 @@ def render_risk_analysis_report(
 | 單艘推力 | {bp_ton:.1f} ton（{bp_kn:.0f} kN） |
 | 合計推力 | {final_tugs*bp_kn:.0f} kN |
 | 推力充足性 | {"✅ 充足" if tug_ok else "⚠️ 需增援"} |
-
-> 推力係數 1.1 ton/100HP（一般港口作業拖船）
 """)
 
     st.markdown("---")
-
-    # ── G. 靠泊 / 離泊時窗建議 ───────────────────────────────
     st.markdown("### G｜靠泊 / 離泊時窗建議")
-    arr_win = getattr(result, "arr_window_result", None)
-    dep_win = getattr(result, "dep_window_result", None)
     ga1, ga2 = st.columns(2)
 
     def _window_card(col, win, label, op_time, color):
         with col:
-            if win is None or not getattr(win,"has_data",False):
+            risks_list = getattr(win, "risks", None) if win is not None else None
+            no_data    = (win is None or risks_list == ["無該時段氣象資料"])
+            if no_data:
                 st.info(f"{label}：無氣象時窗資料")
                 return
-            g    = getattr(win,"max_wind_gust",0.0) or 0.0
-            wv   = getattr(win,"max_wave_height",0.0) or 0.0
-            hr   = getattr(win,"high_risk_hours",0) or 0
-            risks = (list(getattr(win,"risks",[])) +
-                     list(getattr(win,"condition_risks",[])))
+            g  = getattr(win, "max_wind_gust",   0.0) or 0.0
+            wv = getattr(win, "max_wave_height",  0.0) or 0.0
+            hr = getattr(win, "high_risk_hours",  0)   or 0
+            all_risks = list(risks_list or []) + list(getattr(win, "condition_risks", []))
             ok     = g < 34 and wv < 2.5
             status = "✅ 條件良好" if ok else "⚠️ 需注意"
             st.markdown(
@@ -1412,18 +1456,21 @@ def render_risk_analysis_report(
                 f"color:{'#059669' if ok else '#B45309'}'>{status}</div></div>",
                 unsafe_allow_html=True,
             )
-            for r in risks:
+            for r in all_risks:
                 st.caption(f"⚠️ {r}")
 
+    # ✅ 從 analyzer 重新計算時窗
+    arr_win = _build_window_from_analyzer(analyzer, arrival)   if (analyzer and arrival)   else None
+    dep_win = _build_window_from_analyzer(analyzer, departure) if (analyzer and departure) else None
     _window_card(ga1, arr_win, "🚢 靠泊時窗", arrival,   "#1E40AF")
     _window_card(ga2, dep_win, "⚓ 離泊時窗", departure, "#065F46")
 
     if df_detail is not None and "wind_gust_kts" in df_detail.columns and "time" in df_detail.columns:
         try:
-            tmp  = df_detail.copy()
+            tmp = df_detail.copy()
             tmp["_gust"] = pd.to_numeric(tmp["wind_gust_kts"], errors="coerce")
             tmp["_time"] = pd.to_datetime(tmp["time"])
-            best = tmp.nsmallest(3, "_gust")[["_time","_gust"]]
+            best = tmp.nsmallest(3, "_gust")[["_time", "_gust"]]
             if not best.empty:
                 best_strs = "、".join(
                     f"{row['_time'].strftime('%m/%d %H:%M')}（{row['_gust']:.0f} kts）"
@@ -1434,11 +1481,9 @@ def render_risk_analysis_report(
             pass
 
     st.markdown("---")
-
-    # ── H. 值班監控計畫 ───────────────────────────────────────
     st.markdown("### H｜值班監控計畫")
     watch_rows = [
-        ("每小時",       "巡視全部纜繩張力；記錄缆繩計數器讀數；確認護舷器位置"),
+        ("每小時",       "巡視全部纜繩張力；記錄纜繩計數器讀數；確認護舷器位置"),
         ("陣風≥28 kts", "每 30 分鐘巡視；通知輪機長；拖船確認備妥"),
         ("陣風≥34 kts", "每 15 分鐘巡視；啟動備用纜繩；通報港務當局"),
         ("陣風≥41 kts", "持續值守甲板；考慮請求拖船移至船旁；評估提前離泊"),
@@ -1456,22 +1501,14 @@ def render_risk_analysis_report(
         )
 
     st.markdown("---")
-
-    # ── I. 應變觸發條件 ───────────────────────────────────────
     st.markdown("### I｜應變觸發條件 & 行動矩陣")
     trigger_rows = [
-        ("#D97706", "MEDIUM",   "Bft 7 / 陣風 28–33 kts",
-         "通知大副；纜繩巡視升至每 30 分鐘；確認拖船 ETA 及就位時間"),
-        ("#DC2626", "HIGH",     "Bft 8 / 陣風 34–40 kts",
-         "加固纜繩；拖船就位船旁；通報港務局；評估貨物作業是否暫停"),
-        ("#7C3AED", "EXTREME",  "Bft 9 / 陣風 41–47 kts",
-         "啟動緊急預案；考慮提前離泊；聯繫公司輪管部主管"),
-        ("#111827", "EVACUATE", "陣風 ≥48 kts (Bft 10+) 或 SF < 1.0",
-         "立即緊急離泊；VHF CH16 通報；填寫緊急事件報告"),
-        ("#0891B2", "WAVE",     "浪高 ≥2.5 m 或 Swell ≥3 m",
-         "評估護舷器及船體搖擺；加強繫泊；暫停貨物吊具作業"),
-        ("#374151", "LINE PART","任一纜繩斷裂",
-         "立即備車；VHF CH16 求助；拖船頂推；視情況緊急離泊"),
+        ("#D97706", "MEDIUM",    "Bft 7 / 陣風 28–33 kts",          "通知大副；纜繩巡視升至每 30 分鐘；確認拖船 ETA 及就位時間"),
+        ("#DC2626", "HIGH",      "Bft 8 / 陣風 34–40 kts",          "加固纜繩；拖船就位船旁；通報港務局；評估貨物作業是否暫停"),
+        ("#7C3AED", "EXTREME",   "Bft 9 / 陣風 41–47 kts",          "啟動緊急預案；考慮提前離泊；聯繫公司輪管部主管"),
+        ("#111827", "EVACUATE",  "陣風 ≥48 kts (Bft 10+) 或 SF < 1.0", "立即緊急離泊；VHF CH16 通報；填寫緊急事件報告"),
+        ("#0891B2", "WAVE",      "浪高 ≥2.5 m 或 Swell ≥3 m",       "評估護舷器及船體搖擺；加強繫泊；暫停貨物吊具作業"),
+        ("#374151", "LINE PART", "任一纜繩斷裂",                      "立即備車；VHF CH16 求助；拖船頂推；視情況緊急離泊"),
     ]
     for color, level, trigger, action in trigger_rows:
         st.markdown(
@@ -1485,8 +1522,6 @@ def render_risk_analysis_report(
         )
 
     st.markdown("---")
-
-    # ── J. 合規確認清單 ───────────────────────────────────────
     st.markdown("### J｜合規確認清單")
     compliance_items = [
         ("OCIMF MEG4 安全係數 SF ≥ 1.7", sf >= 1.7,
@@ -1496,11 +1531,9 @@ def render_risk_analysis_report(
         ("拖船推力滿足操船需求", tug_ok,
          f"共 {final_tugs} 艘拖船" if tug_ok else "⚠️ 建議增加拖船"),
         ("陣風未超 OCIMF 作業上限（Bft 8 / 34 kts）", rec_gust < 34,
-         f"最大陣風 {rec_gust:.0f} kts" if rec_gust < 34
-         else f"⚠️ 最大陣風 {rec_gust:.0f} kts，已超 Bft 8 界限"),
+         f"最大陣風 {rec_gust:.0f} kts" if rec_gust < 34 else f"⚠️ 最大陣風 {rec_gust:.0f} kts，已超 Bft 8 界限"),
         ("浪高未超 OCIMF 警戒值（2.5 m）", rec_wave < 2.5,
-         f"最大浪高 {rec_wave:.2f} m" if rec_wave < 2.5
-         else f"⚠️ 最大浪高 {rec_wave:.2f} m，需評估護舷器"),
+         f"最大浪高 {rec_wave:.2f} m" if rec_wave < 2.5 else f"⚠️ 最大浪高 {rec_wave:.2f} m，需評估護舷器"),
         ("應變計畫已告知全體值班人員", True, "請於作業前確認 Section H/I"),
     ]
     for label, ok, note in compliance_items:
@@ -1523,8 +1556,7 @@ def render_risk_analysis_report(
         f"padding:12px 16px;font-size:0.8em;color:#64748B'>"
         f"<b>⚠️ 免責聲明</b>：本分析書由 IWBDSS Pro 系統依據 OCIMF 方法自動生成，"
         f"僅供決策輔助參考，不構成操作指令。最終靠泊決策權在船長（Master），"
-        f"並應遵守港口國主管機關之規定。報告生成時間：{gen_time}。"
-        f"</div>",
+        f"並應遵守港口國主管機關之規定。報告生成時間：{gen_time}。</div>",
         unsafe_allow_html=True,
     )
 
@@ -1545,29 +1577,18 @@ def render_ai_analysis(
 
     st.subheader("🤖 AI 決策輔助分析")
 
-    # 修正 #U3：safety_factor 改從 MOORING.fixed_safety_factor 取得，
-    # 原版使用 sidebar_data.get("safety_factor", 0.5)，
-    # 但 render_sidebar 回傳的 dict 根本沒有此 key，永遠用 0.5，
-    # 導致纜繩容量計算偏低約 40%。
     mooring_cap = calculate_mooring_capacity(
         num_bow_lines          = sidebar_data["bh"],
         num_bow_spring_lines   = sidebar_data["bs"],
         num_stern_lines        = sidebar_data["sh"],
         num_stern_spring_lines = sidebar_data["ss"],
         mbl_per_line           = sidebar_data["mbs"],
-        safety_factor          = _MOORING.fixed_safety_factor,  # 修正 #U3
+        safety_factor          = _MOORING.fixed_safety_factor,
     )
-    tug_final_count = _get_tug_value(
-        result.tug_recommendation, "final_tug_count", "final_tug_count", 0
-    )
-    tug_cap = calculate_tug_capacity(tug_final_count, sidebar_data["tug_hp"])
-
-    max_force_N = _get_wfs_value(
-        result.wind_force_summary, "max_gust_force_N", "max_gust_force_N"
-    )
-    sf = _get_wfs_value(
-        result.wind_force_summary, "safety_factor", "safety_factor"
-    )
+    tug_final_count = _get_tug_value(result.tug_recommendation, "final_tug_count", "final_tug_count", 0)
+    tug_cap         = calculate_tug_capacity(tug_final_count, sidebar_data["tug_hp"])
+    max_force_N     = _get_wfs_value(result.wind_force_summary, "max_gust_force_N", "max_gust_force_N")
+    sf              = _get_wfs_value(result.wind_force_summary, "safety_factor",    "safety_factor")
 
     if ai_mode == "快速摘要":
         render_risk_analysis_report(
@@ -1577,12 +1598,10 @@ def render_ai_analysis(
         return
 
     with st.spinner("AI 正在進行深度分析（Perplexity）..."):
-
         total_records  = len(df_detail)
         offshore_count = (
             int(pd.to_numeric(df_detail["is_offshore"], errors="coerce").fillna(0).sum())
-            if "is_offshore" in df_detail.columns
-            else 0
+            if "is_offshore" in df_detail.columns else 0
         )
 
         vessel_params = VesselParams(
@@ -1613,16 +1632,13 @@ def render_ai_analysis(
                 if "wind_gust_kts" in df_detail.columns else 0.0
             ),
             dominant_wind_dir         = dominant_wind_dir,
-            offshore_wind_ratio       = (
-                offshore_count / total_records * 100 if total_records > 0 else 0.0
-            ),
+            offshore_wind_ratio       = (offshore_count / total_records * 100 if total_records > 0 else 0.0),
             mooring_capacity_total_kN = mooring_cap.total_capacity_kN,
             tug_capacity_total_kN     = tug_cap.total_push_kN,
         )
 
         hourly_data = _build_hourly_risk_entries(df_detail)
-
-        ai_content = st.session_state.ai_analyzer.generate_analysis(
+        ai_content  = st.session_state.ai_analyzer.generate_analysis(
             port_name        = analyzer.port_name,
             vessel_params    = vessel_params,
             analysis_results = analysis_results,
@@ -1636,11 +1652,11 @@ def render_ai_analysis(
 # ================= 數據列表 =================
 
 def render_data_list(
-    df_detail:     Optional[pd.DataFrame],
-    _analyzer:     Any = None,
-    _sidebar_data: Dict[str, Any] = None,
+    df_detail: Optional[pd.DataFrame],
 ) -> None:
+    """只顯示氣象數據表格，靠離泊建議已移至 tab1。"""
     if df_detail is None:
+        st.warning("⚠️ 無氣象數據可顯示")
         return
 
     st.subheader("📋 氣象數據列表")
@@ -1650,20 +1666,24 @@ def render_data_list(
         col.caption(f"● {spec.name_zh}")
 
     _COL_MAP = {
-        "時間":       ("time",          "time"),
-        "風速(kts)":  ("wind_speed_kts", "kts"),
-        "陣風(kts)":  ("wind_gust_kts",  "kts"),
-        "風向(°)":    ("wind_dir_deg",   "deg"),
-        "浪高(m)":    ("wave_sig_m",     "m"),
-        "最大浪(m)":  ("wave_max_m",     "m"),
-        "平均力(kN)": ("avg_force_N",    "force"),
-        "陣風力(kN)": ("gust_force_N",   "force"),
-        "風險":       ("risk_level",     "risk"),
-        "安全係數":   ("safety_factor",  "factor"),
+        "時間 (UTC)":      ("time",               "time_utc"),
+        "時間 (TPE)":      ("time",               "time_lt"),
+        "風速(kts)":       ("wind_speed_kts",     "kts"),
+        "陣風(kts)":       ("wind_gust_kts",      "kts"),
+        "風向(°)":         ("wind_dir_deg",       "deg"),
+
+        # ✅ 新增：Port vs Pilot 波高對比
+        "港區浪高(m)":     ("port_wave_height_m", "m"),    # portForecast.sigWaveHeight
+        "引水點浪高(m)":   ("pilot_wave_height_m","m"),    # pilotForecast.sigWaveHeight ← 新增
+        "最大浪(m)":       ("pilot_wave_max_m",   "m"),    # pilotForecast.maxHeight
+
+        "平均力(kN)":      ("avg_force_N",        "force"),
+        "陣風力(kN)":      ("gust_force_N",       "force"),
+        "風險":            ("risk_level",         "risk"),
+        "安全係數":        ("safety_factor",      "factor"),
     }
 
-    _RISK_ZH = {key: spec.name_zh for key, spec in RISK_LEVEL_SPECS.items()}
-
+    _RISK_ZH   = {key: spec.name_zh for key, spec in RISK_LEVEL_SPECS.items()}
     display_df = df_detail.copy()
     show_df    = pd.DataFrame()
 
@@ -1675,8 +1695,13 @@ def render_data_list(
             if isinstance(raw, pd.DataFrame):
                 raw = raw.iloc[:, 0]
 
-            if fmt == "time":
-                show_df[display_name] = pd.to_datetime(raw).dt.strftime("%Y-%m-%d %H:%M")
+            if fmt == "time_utc":
+                show_df[display_name] = pd.to_datetime(raw).dt.strftime("%Y-%m-%d %H:%M") + " UTC"
+            elif fmt == "time_lt":
+                show_df[display_name] = (
+                    (pd.to_datetime(raw) + pd.Timedelta(hours=8))
+                    .dt.strftime("%Y-%m-%d %H:%M") + " TPE"
+                )
             elif fmt == "force":
                 show_df[display_name] = (pd.to_numeric(raw, errors="coerce") / 1000).round(1)
             elif fmt in ("kts", "deg", "m"):
@@ -1684,9 +1709,9 @@ def render_data_list(
             elif fmt == "factor":
                 show_df[display_name] = pd.to_numeric(raw, errors="coerce").round(2)
             elif fmt == "risk":
-                gust_col = display_df.get("wind_gust_kts", pd.Series(0.0, index=display_df.index))
-                wind_col = display_df.get("wind_speed_kts", pd.Series(0.0, index=display_df.index))
-                wave_col = display_df.get("wave_sig_m",    pd.Series(0.0, index=display_df.index))
+                gust_col = display_df["wind_gust_kts"]  if "wind_gust_kts"  in display_df.columns else pd.Series(0.0, index=display_df.index)
+                wind_col = display_df["wind_speed_kts"] if "wind_speed_kts" in display_df.columns else pd.Series(0.0, index=display_df.index)
+                wave_col = display_df["wave_sig_m"]     if "wave_sig_m"     in display_df.columns else pd.Series(0.0, index=display_df.index)
                 op_risk  = [
                     _classify_op_risk(
                         float(g) if pd.notna(g) else 0.0,
@@ -1698,7 +1723,6 @@ def render_data_list(
                 show_df[display_name] = [_RISK_ZH.get(k, k) for k in op_risk]
             else:
                 show_df[display_name] = raw
-
         except Exception:
             logger.warning("render_data_list：欄位 '%s' 處理失敗，已跳過", src_col)
             continue
@@ -1706,6 +1730,7 @@ def render_data_list(
     def _highlight_risk(row: pd.Series) -> list[str]:
         return _risk_row_style(str(row.get("風險", "")), len(row))
 
+    # ✅ 修正：只定義一次 _cell_style，移除重複定義
     def _cell_style(series: pd.Series, thr: dict) -> pd.Series:
         def _fmt(val):
             try:
@@ -1713,9 +1738,7 @@ def render_data_list(
             except (TypeError, ValueError):
                 return ""
             color = _thr_color(v, thr)
-            if color == "#374151":
-                return ""
-            return f"color: {color}; font-weight: bold"
+            return "" if color == "#374151" else f"color: {color}; font-weight: bold"
         return series.map(_fmt)
 
     styler = show_df.style.apply(_highlight_risk, axis=1)
@@ -1748,227 +1771,35 @@ def render_welcome_page() -> None:
           <div style='font-size:0.95em;color:#6B7280;margin-top:4px;letter-spacing:1px;'>
             Integrated Weather &amp; Berthing Decision Support System v2.1
           </div>
-          <div style='font-size:0.88em;color:#9CA3AF;margin-top:2px;'>
-            整合式氣象靠泊決策輔助系統
-          </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
     st.markdown(
         """
         <div style='background:#F0F4FF;border-left:5px solid #3B82F6;
              border-radius:8px;padding:14px 20px;margin-bottom:20px;color:#1E3A8A;font-size:0.93em;'>
-          👈 &nbsp;<b>To get started / 操作方式：</b>
-          在左側側邊欄選擇港口並載入氣象資料，填寫靠泊參數後點擊「🚀 開始分析」。<br>
-          <span style='opacity:0.75'>Select a port from the sidebar, load weather data,
-          fill in berthing parameters, then click <b>Run Analysis</b>.</span>
+          👈 &nbsp;<b>操作方式：</b>在左側側邊欄選擇港口並載入氣象資料，填寫靠泊參數後點擊「🚀 開始分析」。
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.markdown(
-            """
-            <div style='background:white;border-radius:12px;padding:20px;
-                 box-shadow:0 2px 12px rgba(0,0,0,0.08);height:100%'>
-              <div style='font-size:1.6em;margin-bottom:6px'>🌊</div>
-              <div style='font-weight:700;color:#1E3A8A;font-size:1.02em'>
-                氣象風險分析<br>
-                <span style='font-size:0.82em;font-weight:400;color:#6B7280'>Weather Risk Analysis</span>
-              </div>
-              <ul style='color:#4B5563;font-size:0.85em;padding-left:18px;margin:10px 0 0'>
-                <li>陣風五級評分（Bft 6–10+）</li>
-                <li>在港高風險時段偵測</li>
-                <li>浪高 / 湧浪評估</li>
-                <li>靠離泊時窗風險掃描</li>
-                <li>夜間作業風險加成</li>
-              </ul>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with col2:
-        st.markdown(
-            """
-            <div style='background:white;border-radius:12px;padding:20px;
-                 box-shadow:0 2px 12px rgba(0,0,0,0.08);height:100%'>
-              <div style='font-size:1.6em;margin-bottom:6px'>⚙️</div>
-              <div style='font-weight:700;color:#1E3A8A;font-size:1.02em'>
-                纜繩與拖船受力<br>
-                <span style='font-size:0.82em;font-weight:400;color:#6B7280'>Mooring &amp; Tug Force</span>
-              </div>
-              <ul style='color:#4B5563;font-size:0.85em;padding-left:18px;margin:10px 0 0'>
-                <li>OCIMF MEG4 安全係數計算</li>
-                <li>WLL = MBL × 0.33（MEG4 標準）</li>
-                <li>風力公式：F = ½ρCdAV²</li>
-                <li>拖船推力：1.1 ton / 100 HP</li>
-                <li>港口等級 SF 門檻（Lvl 1–10）</li>
-              </ul>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with col3:
-        st.markdown(
-            """
-            <div style='background:white;border-radius:12px;padding:20px;
-                 box-shadow:0 2px 12px rgba(0,0,0,0.08);height:100%'>
-              <div style='font-size:1.6em;margin-bottom:6px'>🤖</div>
-              <div style='font-weight:700;color:#1E3A8A;font-size:1.02em'>
-                AI 決策輔助<br>
-                <span style='font-size:0.82em;font-weight:400;color:#6B7280'>AI Decision Support</span>
-              </div>
-              <ul style='color:#4B5563;font-size:0.85em;padding-left:18px;margin:10px 0 0'>
-                <li>完整靠泊風險分析書</li>
-                <li>各風險等級具體舒緩措施</li>
-                <li>公司主管 &amp; 船長雙視角</li>
-                <li>OCIMF 合規查核清單</li>
-                <li>應變觸發矩陣</li>
-              </ul>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    st.markdown(
-        """
-        <div style='background:linear-gradient(135deg,#1E3A8A 0%,#4C1D95 100%);
-             border-radius:12px;padding:20px 28px;color:white;margin-top:8px'>
-          <div style='font-weight:700;font-size:1em;margin-bottom:12px;letter-spacing:1px'>
-            風險等級對照 / RISK LEVEL REFERENCE
-          </div>
-          <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:10px;
-               font-size:0.84em;text-align:center'>
-            <div style='background:rgba(255,255,255,0.12);border-radius:8px;padding:10px'>
-              <div style='font-weight:700;color:#86EFAC'>LOW 低風險</div>
-              <div style='opacity:0.85;margin-top:4px'>評分 &lt; 25</div>
-              <div style='opacity:0.7;font-size:0.85em'>正常作業</div>
-            </div>
-            <div style='background:rgba(255,255,255,0.12);border-radius:8px;padding:10px'>
-              <div style='font-weight:700;color:#FDE68A'>MEDIUM 中風險</div>
-              <div style='opacity:0.85;margin-top:4px'>評分 25–49</div>
-              <div style='opacity:0.7;font-size:0.85em'>強化監視</div>
-            </div>
-            <div style='background:rgba(255,255,255,0.12);border-radius:8px;padding:10px'>
-              <div style='font-weight:700;color:#FCA5A5'>HIGH 高風險</div>
-              <div style='opacity:0.85;margin-top:4px'>評分 50–74</div>
-              <div style='opacity:0.7;font-size:0.85em'>採取舒緩</div>
-            </div>
-            <div style='background:rgba(255,255,255,0.12);border-radius:8px;padding:10px'>
-              <div style='font-weight:700;color:#F87171'>EXTREME 極高風險</div>
-              <div style='opacity:0.85;margin-top:4px'>評分 ≥ 75</div>
-              <div style='opacity:0.7;font-size:0.85em'>考慮延後</div>
-            </div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    st.markdown(
-        "<div style='font-weight:700;font-size:1.08em;color:#1E3A8A;"
-        "letter-spacing:1px;margin-bottom:14px'>📖 操作步驟 / HOW TO USE</div>",
-        unsafe_allow_html=True,
-    )
-
-    steps_guide = [
-        ("1", "#3B82F6", "選擇港口 / Select a Port",
-         "在左側「<b>1. 選擇港口</b>」下拉選單選取目的港，系統自動帶入港口座標與氣象站資訊。"),
-        ("2", "#8B5CF6", "載入氣象資料 / Load Weather Data",
-         "點擊 <b>🔄</b> 按鈕從 WNI 即時抓取預報，出現綠色確認橫幅即表示資料就緒。"),
-        ("3", "#059669", "設定靠泊參數 / Configure Parameters",
-         "填入 ETA / ETD、泊位方向、靠泊舷，展開「<b>⚓ 船舶細節</b>」輸入船型、受風面積、MBL 及纜繩配置。"),
-        ("4", "#D97706", "執行分析 / Run Analysis",
-         "點擊「<b>🚀 開始分析</b>」，系統以 F = ½ρCdAV² 計算風力並產出五類加權風險評分。"),
-        ("5", "#DC2626", "檢視結果 / Review Results",
-         "結果分四個索引頁：<b>詳細報告</b>、<b>圖表分析</b>、<b>AI 輔助</b>、<b>數據列表</b>。"),
-        ("6", "#0891B2", "執行舒緩措施 / Act on Recommendations",
-         "各風險等級對應具體措施：增加纜繩、安排拖船候命、通知港務機關，或評估延後靠泊。"),
+    cards = [
+        (col1, "🌊", "氣象風險分析", ["陣風五級評分（Bft 6–10+）","在港高風險時段偵測","浪高 / 湧浪評估","靠離泊時窗風險掃描","夜間作業風險加成"]),
+        (col2, "⚙️", "纜繩與拖船受力", ["OCIMF MEG4 安全係數計算","WLL = MBL × 0.33（MEG4 標準）","風力公式：F = ½ρCdAV²","拖船推力：1.1 ton / 100 HP","港口等級 SF 門檻（Lvl 1–10）"]),
+        (col3, "🤖", "AI 決策輔助", ["完整靠泊風險分析書","各風險等級具體舒緩措施","公司主管 & 船長雙視角","OCIMF 合規查核清單","應變觸發矩陣"]),
     ]
-
-    for i in range(0, len(steps_guide), 2):
-        row_cols = st.columns(2)
-        for j, col in enumerate(row_cols):
-            if i + j >= len(steps_guide):
-                break
-            num, color, title, desc = steps_guide[i + j]
-            col.markdown(
-                f"<div style='background:white;border-radius:10px;padding:16px 18px;"
-                f"box-shadow:0 2px 10px rgba(0,0,0,0.07);margin-bottom:12px;"
-                f"border-left:4px solid {color}'>"
-                f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:8px'>"
-                f"<div style='background:{color};color:white;border-radius:50%;width:26"
-                f"px;height:26px;display:flex;align-items:center;justify-content:center;"
-                f"font-weight:700;font-size:0.85em;flex-shrink:0'>{num}</div>"
-                f"<div style='font-weight:700;color:#111827;font-size:0.92em'>{title}</div>"
-                f"</div>"
-                f"<div style='color:#4B5563;font-size:0.83em;line-height:1.7'>{desc}</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    with st.expander("📋 輸入參數說明 / Input Parameter Reference", expanded=False):
-        st.markdown("""
-| 參數 Parameter | 單位 Unit | 說明 Notes |
-|---|---|---|
-| ETA / ETD | 日期+時間 | 靠泊 / 離泊日期時間 |
-| 泊位方向 Berth Heading | ° (0–360) | 泊位面向真方位 |
-| 靠泊舷 Alongside Side | 左 Port / 右 Stbd | 靠泊側 |
-| 受風面積 Windage Area | m² | 水線以上側向投影面積 |
-| 吃水艏/艉 Draft Fwd/Aft | m | 前後吃水 |
-| MBL | kN | 每條纜繩最低破斷負荷 |
-| 艏尾纜 / 倒纜 Lines / Springs | 條 count | 各段纜繩數量 |
-| 拖船數量 Tug Count | 艘 count | 協助作業拖船艘數 |
-| 拖船馬力 Tug HP | HP | 推力基準 1.1 ton / 100 HP |
-| 風阻係數 Cd | — | 貨櫃船 1.0–1.3 ｜ 油散輪 0.8–1.1 ｜ 滾裝船 1.1–1.3 |
-""")
-
-    st.markdown(
-        """
-        <div style='background:#FFF7ED;border:1px solid #FED7AA;border-radius:10px;
-             padding:16px 20px;margin-top:8px'>
-          <div style='font-weight:700;color:#92400E;margin-bottom:10px;font-size:0.95em'>
-            ⚠️ 重要說明 / Important Notices
-          </div>
-          <ul style='color:#78350F;font-size:0.84em;margin:0;padding-left:18px;line-height:1.9'>
-            <li>
-              本系統為<b>決策輔助工具</b>，最終靠離泊決策權由船長與引航員依 COLREGS 及港口規定行使。<br>
-              <span style='opacity:0.75'>This system is a <b>decision support tool</b>.
-              Final go/no-go authority rests with the Master and Pilot.</span>
-            </li>
-            <li>
-              氣象預報具有不確定性，請務必交叉參考 NAVTEX 及港口 VHF 官方氣象廣播。<br>
-              <span style='opacity:0.75'>Always cross-reference with official port
-              meteorological broadcasts (NAVTEX / port VHF).</span>
-            </li>
-            <li>
-              安全係數依 <b>OCIMF MEG4</b> 標準計算，各港口可能訂有更嚴格規定，應向港務局確認。<br>
-              <span style='opacity:0.75'>SF calculations follow OCIMF MEG4.
-              Local port regulations may impose stricter limits.</span>
-            </li>
-            <li>
-              無法即時抓取氣象時，可直接上傳 WNI CSV 檔案進行離線分析。<br>
-              <span style='opacity:0.75'>For ports where live weather fetch is unavailable,
-              upload a WNI CSV file directly for offline analysis.</span>
-            </li>
-          </ul>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
+    for col, icon, title, items in cards:
+        items_html = "".join(f"<li>{i}</li>" for i in items)
+        col.markdown(
+            f"<div style='background:white;border-radius:12px;padding:20px;"
+            f"box-shadow:0 2px 12px rgba(0,0,0,0.08);height:100%'>"
+            f"<div style='font-size:1.6em;margin-bottom:6px'>{icon}</div>"
+            f"<div style='font-weight:700;color:#1E3A8A;font-size:1.02em'>{title}</div>"
+            f"<ul style='color:#4B5563;font-size:0.85em;padding-left:18px;margin:10px 0 0'>"
+            f"{items_html}</ul></div>",
+            unsafe_allow_html=True,
+        )
 

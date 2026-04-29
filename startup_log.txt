@@ -1,0 +1,20 @@
+IWBDSS Pro startup log 
+Time: 週三 2026/04/29 14:00:47.02 
+======================================== 
+======================================== 
+ IWBDSS Pro - Startup 
+======================================== 
+[Step 1] Check Python 
+[OK] Python 3.11.9 - OK 
+[Step 2] Check venv 
+[OK] venv exists: venv\Scripts\python.exe 
+[Step 3] Activate venv 
+[OK] venv activated: C:\Users\mxxxx\Desktop\Python�M��\IWBDSS_Project2.0\venv 
+[Step 4] Check packages 
+[OK] Packages up to date, skipping install 
+[Step 5] Check Streamlit 
+[OK] Streamlit version - OK 
+[Step 6] Check app file 
+[OK] app.py found 
+[Step 7] Launch IWBDSS Pro 
+Launching Streamlit on port 8501... 

@@ -1,66 +1,46 @@
 # app.py
-"""
-IWBDSS Pro — 船舶靠泊決策輔助系統
-
-架構：
-  app.py          → Streamlit 進入點，僅負責頁面流程編排
-  analysis.py     → 核心氣象解析與風險計算
-  models.py       → 資料結構（VesselInfo、AnalysisResult 等）
-  ui_components.py → 所有 Streamlit UI 渲染
-  plotting.py     → Matplotlib / Plotly 圖表
-  weather_crawler.py      → 港口氣象資料爬蟲
-  app_config.py   → 常數與設定
-  app_helpers.py  → 共用輔助函式
-  font_loader.py  → Matplotlib 中文字體設定
-
-修正項目：
-  #A - 移除模組頂層 PERPLEXITY_API_KEY 常數（import 時求值，st.secrets 可能未就緒）
-  #B - 移除 _get_ai_analyzer 的 @st.cache_resource（雙層快取導致 Key 在錯誤時機被捕捉）
-  #C - API Key 改為在函式執行時動態讀取，並傳入 _secrets_hash 確保快取正確失效
-"""
 from __future__ import annotations
 
 import logging
 import math
+import os
 import traceback
-from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional
 
 import pandas as pd
 import streamlit as st
 
+from dotenv import load_dotenv
+load_dotenv()
+
 logger = logging.getLogger(__name__)
+
 
 # ==================== 模組匯入 ====================
 
 def _import_modules():
     modules = {
-        "analysis":      ["WeatherParser", "WeatherAnalyzer"],
-        "models":        ["VesselInfo", "AnalysisResult"],
-        "font_loader":   ["ensure_chinese_font"],
-        "weather_crawler":       ["PortWeatherCrawler"],
-        "AI_Analyzer":   ["get_cached_ai_analyzer", "_get_secrets_hash"],  # 修正 #C：同時匯入 _get_secrets_hash
-        "app_config":    [
-            "PHYSICS",
-            "MOORING",
-            "THRESHOLDS",
-            "RISK_LEVEL_SPECS",
-            "RISK_LEVEL_COLORS",
-            "RISK_LEVEL_LABELS",
-            "COMPASS",
-            "BEAUFORT",
-            "FIELD_MAPPING",
-            "AppConfig",
-            "score_to_risk_level",
-            "risk_level_to_zh",
+        "analysis":        ["WeatherParser", "WeatherAnalyzer"],
+        "models":          ["VesselInfo", "AnalysisResult"],
+        "font_loader":     ["ensure_chinese_font"],
+        "weather_crawler": ["PortWeatherCrawler"],
+        "AI_Analyzer":     ["get_cached_ai_analyzer"],
+        "app_config": [
+            "PHYSICS", "MOORING", "THRESHOLDS",
+            "RISK_LEVEL_SPECS", "RISK_LEVEL_COLORS", "RISK_LEVEL_LABELS",
+            "COMPASS", "BEAUFORT", "FIELD_MAPPING",
+            "AppConfig", "score_to_risk_level", "risk_level_to_zh",
         ],
-        "app_helpers":   ["normalize_dataframe", "AIR_DENSITY", "knots_to_ms", "compass_to_degrees"],
+        "app_helpers": [
+            "normalize_dataframe", "AIR_DENSITY",
+            "knots_to_ms", "compass_to_degrees",
+        ],
         "ui_components": [
             "render_sidebar", "render_port_info", "render_kpi_metrics",
             "render_detail_report", "render_chart_analysis",
             "render_ai_analysis", "render_data_list", "render_welcome_page",
-            "render_berthing_advisory",
+            "render_berthing_advisory",   # ✅ 明確匯入
         ],
     }
 
@@ -78,10 +58,7 @@ def _import_modules():
             missing.append(f"  - 無法匯入 `{module_name}`: {exc}")
 
     if missing:
-        st.error(
-            "❌ 以下名稱匯入失敗，請確認模組內容：\n\n"
-            + "\n".join(missing)
-        )
+        st.error("❌ 以下名稱匯入失敗：\n\n" + "\n".join(missing))
         st.stop()
 
     return imported
@@ -89,7 +66,6 @@ def _import_modules():
 
 _mods = _import_modules()
 
-# ── 繫結至本地名稱 ─────────────────────────────────────────
 WeatherParser          = _mods["WeatherParser"]
 WeatherAnalyzer        = _mods["WeatherAnalyzer"]
 VesselInfo             = _mods["VesselInfo"]
@@ -97,45 +73,37 @@ AnalysisResult         = _mods["AnalysisResult"]
 ensure_chinese_font    = _mods["ensure_chinese_font"]
 PortWeatherCrawler     = _mods["PortWeatherCrawler"]
 get_cached_ai_analyzer = _mods["get_cached_ai_analyzer"]
-_get_secrets_hash      = _mods["_get_secrets_hash"]      # 修正 #C
 
-# app_config
-PHYSICS                = _mods["PHYSICS"]
-MOORING                = _mods["MOORING"]
-THRESHOLDS             = _mods["THRESHOLDS"]
-RISK_LEVEL_SPECS       = _mods["RISK_LEVEL_SPECS"]
-RISK_LEVEL_COLORS      = _mods["RISK_LEVEL_COLORS"]
-RISK_LEVEL_LABELS      = _mods["RISK_LEVEL_LABELS"]
-COMPASS                = _mods["COMPASS"]
-BEAUFORT               = _mods["BEAUFORT"]
-FIELD_MAPPING          = _mods["FIELD_MAPPING"]
-AppConfig              = _mods["AppConfig"]
-score_to_risk_level    = _mods["score_to_risk_level"]
-risk_level_to_zh       = _mods["risk_level_to_zh"]
+PHYSICS             = _mods["PHYSICS"]
+MOORING             = _mods["MOORING"]
+THRESHOLDS          = _mods["THRESHOLDS"]
+RISK_LEVEL_SPECS    = _mods["RISK_LEVEL_SPECS"]
+RISK_LEVEL_COLORS   = _mods["RISK_LEVEL_COLORS"]
+RISK_LEVEL_LABELS   = _mods["RISK_LEVEL_LABELS"]
+COMPASS             = _mods["COMPASS"]
+BEAUFORT            = _mods["BEAUFORT"]
+FIELD_MAPPING       = _mods["FIELD_MAPPING"]
+AppConfig           = _mods["AppConfig"]
+score_to_risk_level = _mods["score_to_risk_level"]
+risk_level_to_zh    = _mods["risk_level_to_zh"]
 
-FIXED_SAFETY_FACTOR    = MOORING.fixed_safety_factor
+FIXED_SAFETY_FACTOR = MOORING.fixed_safety_factor
+PERPLEXITY_API_KEY  = AppConfig.perplexity_api_key()
 
-# 修正 #A：移除模組頂層的 PERPLEXITY_API_KEY 常數。
-# 原版在 import 時立即執行 AppConfig.perplexity_api_key()，
-# 此時 st.secrets 在部分部署環境下可能尚未就緒，導致取得空字串。
-# Key 的讀取改為在 _get_ai_analyzer() 執行時才進行（見下方服務初始化區塊）。
+normalize_dataframe  = _mods["normalize_dataframe"]
+AIR_DENSITY          = _mods["AIR_DENSITY"]
+knots_to_ms          = _mods["knots_to_ms"]
+compass_to_degrees   = _mods["compass_to_degrees"]
 
-# app_helpers
-normalize_dataframe    = _mods["normalize_dataframe"]
-AIR_DENSITY            = _mods["AIR_DENSITY"]
-knots_to_ms            = _mods["knots_to_ms"]
-compass_to_degrees     = _mods["compass_to_degrees"]
-
-# ui_components
-render_sidebar         = _mods["render_sidebar"]
-render_port_info       = _mods["render_port_info"]
-render_kpi_metrics     = _mods["render_kpi_metrics"]
-render_detail_report   = _mods["render_detail_report"]
-render_chart_analysis  = _mods["render_chart_analysis"]
-render_ai_analysis     = _mods["render_ai_analysis"]
-render_data_list       = _mods["render_data_list"]
-render_welcome_page    = _mods["render_welcome_page"]
-render_berthing_advisory = _mods["render_berthing_advisory"]
+render_sidebar           = _mods["render_sidebar"]
+render_port_info         = _mods["render_port_info"]
+render_kpi_metrics       = _mods["render_kpi_metrics"]
+render_detail_report     = _mods["render_detail_report"]
+render_chart_analysis    = _mods["render_chart_analysis"]
+render_ai_analysis       = _mods["render_ai_analysis"]
+render_data_list         = _mods["render_data_list"]
+render_welcome_page      = _mods["render_welcome_page"]
+render_berthing_advisory = _mods["render_berthing_advisory"]   # ✅
 
 
 # ==================== 頁面配置 ====================
@@ -159,6 +127,7 @@ _SESSION_DEFAULTS: dict = {
     "df_analysis": None,
     "ai_analyzer": None,
     "port_info":   None,
+    "last_result": None,
 }
 
 for _key, _default in _SESSION_DEFAULTS.items():
@@ -170,41 +139,16 @@ for _key, _default in _SESSION_DEFAULTS.items():
 
 @st.cache_resource
 def _get_crawler() -> PortWeatherCrawler:
-    return PortWeatherCrawler()
-
-
-def _get_ai_analyzer():
-    """
-    建立並回傳快取的 AIAnalyzer 實例。
-
-    修正 #B：移除原本套在此函式上的 @st.cache_resource。
-    原版形成「雙層快取」：
-      外層（此函式）快取 key = 無參數簽名，永遠命中同一快取；
-      內層（get_cached_ai_analyzer）才是真正帶 Key 的快取。
-    雙層快取導致外層在第一次執行後就固定，即使 Key 已更新也不會
-    重新呼叫內層，造成 AIAnalyzer 始終持有舊的（或空的）Key。
-
-    修正 #C：API Key 改為在此函式執行時動態讀取（而非模組頂層），
-    確保 st.secrets 已完全就緒。同時傳入 _secrets_hash 作為
-    get_cached_ai_analyzer 的快取 key，讓 Key 更新後快取能正確失效。
-    """
-    api_key      = AppConfig.perplexity_api_key()   # 執行時才讀取
-    secrets_hash = _get_secrets_hash()               # 用於快取失效偵測
-
-    # 除錯用：確認 Key 是否正確讀取（僅顯示前綴，不暴露完整 Key）
-    if api_key:
-        logger.info(
-            "AI Analyzer 初始化 — Key 前綴: %s****，hash: %s",
-            api_key[:8],
-            secrets_hash,
-        )
-    else:
-        logger.warning("AI Analyzer 初始化 — API Key 為空，AI 分析功能將無法使用。")
-
-    return get_cached_ai_analyzer(
-        api_key       = api_key,
-        _secrets_hash = secrets_hash,
+    return PortWeatherCrawler(
+        username   = os.getenv("AWT_USERNAME", ""),
+        password   = os.getenv("AWT_PASSWORD", ""),
+        auto_login = False,
     )
+
+
+@st.cache_resource
+def _get_ai_analyzer():
+    return get_cached_ai_analyzer(PERPLEXITY_API_KEY)
 
 
 crawler = _get_crawler()
@@ -214,28 +158,14 @@ if st.session_state.ai_analyzer is None:
 
 
 # ==================== 物理計算輔助函式 ====================
-# 從 analysis.py 的私有邏輯提取為 app.py 層級的獨立函式，
-# 供 _build_detail_dataframe 逐行計算使用。
 
-# 纜繩效率係數（與 analysis.py MooringEfficiency 一致）
-_HEAD_TRANS   = 0.95
-_HEAD_LONG    = 0.15
-_SPRING_TRANS = 0.25
-_SPRING_LONG  = 0.95
-
-# 拖船換算係數（與 analysis.py 一致）
+_HEAD_TRANS              = 0.95
+_SPRING_TRANS            = 0.25
 _HP_TO_BOLLARD_PER_100HP = 1.1
 _GRAVITY                 = 9.81
 
 
-def _compute_vessel_heading(vessel: VesselInfo) -> float:
-    """
-    依靠泊舷側計算船艏向。
-
-    與 WeatherAnalyzer._vessel_heading 邏輯完全一致：
-      - 右靠 (starboard)：heading = berth_direction + 180°
-      - 左靠 (port)：      heading = berth_direction
-    """
+def _compute_vessel_heading(vessel) -> float:
     side = str(vessel.berthing_side).lower().strip()
     if any(k in side for k in ("starboard", "右", "s", "stbd")):
         return (vessel.berth_direction + 180) % 360
@@ -245,114 +175,81 @@ def _compute_vessel_heading(vessel: VesselInfo) -> float:
 def _compute_wind_force_row(
     wind_gust_kts: float,
     wind_dir_deg:  float,
-    vessel:        VesselInfo,
+    vessel,
     heading:       float,
 ) -> tuple[float, float, str]:
-    """
-    計算單筆記錄的風力。
-
-    Returns:
-        (total_force_N, transverse_force_N, wind_type)
-
-    與 WeatherAnalyzer._calc_wind_force 邏輯完全一致。
-    """
     wind_ms  = knots_to_ms(wind_gust_kts)
     relative = (wind_dir_deg - heading + 180) % 360 - 180
     abs_rel  = abs(relative)
-
-    if 45 <= abs_rel <= 135:
-        wind_type = "offshore" if relative > 0 else "onshore"
-    else:
-        wind_type = "parallel"
-
+    wind_type = (
+        ("offshore" if relative > 0 else "onshore")
+        if 45 <= abs_rel <= 135
+        else "parallel"
+    )
     drag_coef = getattr(vessel, "wind_drag_coef", 1.0)
     total_N   = 0.5 * AIR_DENSITY * drag_coef * vessel.wind_area * wind_ms ** 2
-    rad       = math.radians(abs_rel)
-
-    trans_N   = total_N * abs(math.sin(rad))
+    trans_N   = total_N * abs(math.sin(math.radians(abs_rel)))
     return total_N, trans_N, wind_type
 
 
-def _compute_mooring_restraint_kN(vessel: VesselInfo) -> float:
-    """
-    計算纜繩橫向抗力 (kN)。
-
-    與 WeatherAnalyzer._calc_mooring_restraint 邏輯完全一致。
-    """
-    wll_N        = vessel.mbl * vessel.safety_factor
+def _compute_mooring_restraint_kN(vessel) -> float:
+    wll_N        = vessel.mbl / vessel.safety_factor
     head_count   = vessel.bow_lines + vessel.stern_lines
     spring_count = vessel.bow_spring_lines + vessel.stern_spring_lines
-    trans_N      = (
-        head_count   * wll_N * _HEAD_TRANS
-        + spring_count * wll_N * _SPRING_TRANS
-    )
-    return trans_N / 1000.0
+    return (head_count * wll_N * _HEAD_TRANS + spring_count * wll_N * _SPRING_TRANS) / 1000.0
 
 
 def _compute_tug_restraint_kN(tug_count: int, tug_hp: float) -> float:
-    """
-    計算拖船助力 (kN)。
-
-    與 WeatherAnalyzer._calc_tug_force 邏輯完全一致。
-    """
     if tug_count <= 0:
         return 0.0
-    bollard_ton = (tug_hp / 100.0) * _HP_TO_BOLLARD_PER_100HP
-    return tug_count * bollard_ton * _GRAVITY
+    return tug_count * (tug_hp / 100.0) * _HP_TO_BOLLARD_PER_100HP * _GRAVITY
 
 
 # ==================== 輔助函式 ====================
 
 def _format_stay_duration(td: timedelta) -> str:
-    """
-    將 timedelta 格式化為「X天 Y小時 Z分」。
-
-    Examples:
-        >>> _format_stay_duration(timedelta(hours=25, minutes=30))
-        '1天 1小時 30分'
-    """
-    total            = int(td.total_seconds())
-    days, remainder  = divmod(total, 86400)
-    hours, seconds   = divmod(remainder, 3600)
-    minutes          = seconds // 60
-    return f"{days}天 {hours}小時 {minutes}分"
+    total           = int(td.total_seconds())
+    days, remainder = divmod(total, 86400)
+    hours, seconds  = divmod(remainder, 3600)
+    return f"{days}天 {hours}小時 {seconds // 60}分"
 
 
-# ── 靠泊側標準化對照表 ────────────────────────────────────
 _SIDE_NORMALISE: dict[str, str] = {
-    "port":         "port",
-    "starboard":    "starboard",
-    "左靠 (port)":  "port",
-    "右靠 (stbd)":  "starboard",
-    "左靠 (Port)":  "port",
-    "右靠 (Stbd)":  "starboard",
+    "port":        "port",   "starboard":   "starboard",
+    "左靠 (port)": "port",   "右靠 (stbd)": "starboard",
+    "左靠 (Port)": "port",   "右靠 (Stbd)": "starboard",
 }
 
 
 def _normalise_side(raw: str) -> str:
-    """將任意格式靠泊側字串統一轉為 'port' 或 'starboard'"""
-    normalised = _SIDE_NORMALISE.get(raw.strip())
-    if normalised is None:
-        logger.warning("berthing_side 值 '%s' 不在標準清單中，預設使用 'port'", raw)
+    n = _SIDE_NORMALISE.get(raw.strip())
+    if n is None:
+        logger.warning("berthing_side '%s' 未知，預設 port", raw)
         return "port"
-    return normalised
+    return n
 
 
 def _build_vessel(sidebar_data: dict) -> VesselInfo:
     """
-    從側邊欄輸入資料建立 VesselInfo。
+    建立 VesselInfo。
 
-    MBL 單位轉換：sidebar 輸入為 kN，VesselInfo 儲存為 N。
+    ⚠️ 時區說明：
+      側邊欄輸入為本地時間（TPE = UTC+8）。
+      WeatherAnalyzer.data[].time 為 UTC naive。
+      → arrival / departure 需減 8h 轉為 UTC，
+        才能讓 _in_port_records / _check_window_risk 正確比對。
     """
-    arrival   = sidebar_data["arrival"]
-    departure = sidebar_data["departure"]
+    arrival_local   = sidebar_data["arrival"]
+    departure_local = sidebar_data["departure"]
+    arrival_utc     = arrival_local   - timedelta(hours=8)   # ✅ TPE → UTC
+    departure_utc   = departure_local - timedelta(hours=8)   # ✅ TPE → UTC
 
     return VesselInfo(
         berth_direction    = sidebar_data["berth_dir"],
         berthing_side      = _normalise_side(sidebar_data["side"]),
-        arrival_time       = arrival,
-        departure_time     = departure,
-        stay_duration      = _format_stay_duration(departure - arrival),
+        arrival_time       = arrival_utc,
+        departure_time     = departure_utc,
+        stay_duration      = _format_stay_duration(departure_local - arrival_local),
         draft_bow          = sidebar_data["draft_b"],
         draft_stern        = sidebar_data["draft_s"],
         mbl                = sidebar_data["mbs"] * 1000.0,
@@ -368,62 +265,10 @@ def _build_vessel(sidebar_data: dict) -> VesselInfo:
         stern_spring_lines = sidebar_data["ss"],
         wind_area          = sidebar_data["area"],
         wind_drag_coef     = sidebar_data.get("cd", 1.0),
-        tug_count          = int(sidebar_data.get("tug_count", 2)),
     )
 
 
-def _build_detail_dataframe(
-    analyzer: WeatherAnalyzer,
-    vessel:   VesselInfo,
-    result:   AnalysisResult,
-) -> pd.DataFrame:
-    """
-    建立詳細氣象 + 風力計算 DataFrame，供圖表與列表使用。
-    """
-    # Step 1：標準化 DataFrame
-    df = normalize_dataframe(analyzer, vessel)
-
-    # Step 2：固定參數
-    heading            = _compute_vessel_heading(vessel)
-    tug_final_count    = _get_tug_final_count(result)
-    mooring_kN         = _compute_mooring_restraint_kN(vessel)
-    tug_kN             = _compute_tug_restraint_kN(tug_final_count, vessel.tug_hp)
-    total_restraint_kN = mooring_kN + tug_kN
-
-    # Step 3：逐行計算風力，確保每個值都是純量
-    gust_force_list:  list[float] = []
-    is_offshore_list: list[int]   = []
-    sf_list:          list[float] = []
-
-    for _, row in df.iterrows():
-        gust_kts = float(row["wind_gust_kts"]) if "wind_gust_kts" in df.columns else 0.0
-        dir_deg  = float(row["wind_dir_deg"])  if "wind_dir_deg"  in df.columns else 0.0
-
-        total_N, trans_N, wind_type = _compute_wind_force_row(
-            wind_gust_kts = gust_kts,
-            wind_dir_deg  = dir_deg,
-            vessel        = vessel,
-            heading       = heading,
-        )
-
-        req_kN = trans_N / 1000.0
-        sf     = total_restraint_kN / req_kN if req_kN > 0.1 else 99.9
-
-        gust_force_list.append(float(total_N))
-        is_offshore_list.append(1 if wind_type == "offshore" else 0)
-        sf_list.append(round(float(sf), 3))
-
-    # Step 4：直接指派欄位，避免 concat 索引錯位
-    df = df.reset_index(drop=True)
-    df["gust_force_N"]  = gust_force_list
-    df["is_offshore"]   = is_offshore_list
-    df["safety_factor"] = sf_list
-
-    return df
-
-
-def _get_tug_final_count(result: AnalysisResult) -> int:
-    """相容 TugRecommendation dataclass 與舊版 dict，取得最終拖船數"""
+def _get_tug_final_count(result) -> int:
     tug = result.tug_recommendation
     if hasattr(tug, "final_tug_count"):
         return int(tug.final_tug_count)
@@ -432,27 +277,41 @@ def _get_tug_final_count(result: AnalysisResult) -> int:
     return 0
 
 
-def _get_attr_or_key(obj: object, attr: str, default):
-    """通用相容器：優先取 dataclass 屬性，退回 dict key"""
-    if hasattr(obj, attr):
-        return getattr(obj, attr)
-    if isinstance(obj, dict):
-        return obj.get(attr, default)
-    return default
+def _build_detail_dataframe(analyzer, vessel, result) -> pd.DataFrame:
+    df = normalize_dataframe(analyzer, vessel)
+
+    heading            = _compute_vessel_heading(vessel)
+    tug_final_count    = _get_tug_final_count(result)
+    mooring_kN         = _compute_mooring_restraint_kN(vessel)
+    tug_kN             = _compute_tug_restraint_kN(tug_final_count, vessel.tug_hp)
+    total_restraint_kN = mooring_kN + tug_kN
+
+    gust_force_list:  list[float] = []
+    is_offshore_list: list[int]   = []
+    sf_list:          list[float] = []
+
+    for _, row in df.iterrows():
+        gust_kts = float(row["wind_gust_kts"]) if "wind_gust_kts" in df.columns else 0.0
+        dir_deg  = float(row["wind_dir_deg"])  if "wind_dir_deg"  in df.columns else 0.0
+        total_N, trans_N, wind_type = _compute_wind_force_row(
+            gust_kts, dir_deg, vessel, heading
+        )
+        req_kN = trans_N / 1000.0
+        sf     = total_restraint_kN / req_kN if req_kN > 0.1 else 99.9
+        gust_force_list.append(float(total_N))
+        is_offshore_list.append(1 if wind_type == "offshore" else 0)
+        sf_list.append(round(float(sf), 3))
+
+    df = df.reset_index(drop=True)
+    df["gust_force_N"]  = gust_force_list
+    df["is_offshore"]   = is_offshore_list
+    df["safety_factor"] = sf_list
+    return df
 
 
 # ==================== 分析邏輯 ====================
 
 def _run_analysis(sidebar_data: dict) -> None:
-    """
-    執行完整分析流程並將結果寫入 session_state。
-
-    步驟：
-      1. 建立 VesselInfo
-      2. 呼叫 analyzer.analyze(vessel) 取得 AnalysisResult
-      3. 建立詳細 DataFrame（含風力與安全係數）
-      4. 將結果寫入 session_state
-    """
     analyzer = st.session_state.analyzer
 
     with st.spinner("🔄 正在進行多維度風險分析..."):
@@ -460,15 +319,14 @@ def _run_analysis(sidebar_data: dict) -> None:
         result    = analyzer.analyze(vessel)
         df_detail = _build_detail_dataframe(analyzer, vessel, result)
 
-        st.session_state.result      = result
-        st.session_state.vessel      = vessel
-        st.session_state.df_analysis = df_detail
+        st.session_state.result         = result
+        st.session_state.vessel         = vessel
+        st.session_state.df_analysis    = df_detail
+        st.session_state["last_result"] = result   # ✅
 
     st.success("✅ 分析完成！")
-    logger.info(
-        "分析完成 — 港口：%s，風險：%s（%.1f）",
-        analyzer.port_name, result.risk_level, result.risk_score,
-    )
+    logger.info("分析完成 — 港口：%s，風險：%s（%.1f）",
+                analyzer.port_name, result.risk_level, result.risk_score)
 
 
 # ==================== 側邊欄 ====================
@@ -485,11 +343,13 @@ if sidebar_data["btn_analyze"] and st.session_state.analyzer:
         st.error(f"❌ 船舶參數驗證失敗：{exc}")
         logger.warning("VesselInfo 驗證失敗", exc_info=True)
     except Exception:
-        st.error("❌ 分析過程發生未預期錯誤，請查看詳細訊息")
+        st.error("❌ 分析過程發生未預期錯誤")
         with st.expander("🔍 詳細錯誤訊息"):
             st.code(traceback.format_exc())
         logger.exception("分析流程發生未預期錯誤")
 
+
+# ==================== 結果顯示 ====================
 
 # ==================== 結果顯示 ====================
 
@@ -499,11 +359,18 @@ if st.session_state.result:
     analyzer  = st.session_state.analyzer
     df_detail = st.session_state.df_analysis
 
+    # ✅ 第1：港口名稱標題
     render_port_info(st.session_state.port_info, analyzer)
+
+
+    st.markdown("---")
+
+    # ✅ 第3：KPI 指標
     render_kpi_metrics(res)
 
     st.markdown("---")
 
+    # ✅ 第4：四個 Tab
     tab1, tab2, tab3, tab4 = st.tabs([
         "📝 詳細報告",
         "📊 圖表分析",
@@ -512,7 +379,11 @@ if st.session_state.result:
     ])
 
     with tab1:
-        render_berthing_advisory(res, ves, analyzer)
+        # ✅ 第2：靠離泊作業建議（移到最頂部）
+        try:
+            render_berthing_advisory(res, ves, analyzer)
+        except Exception:
+            logger.exception("render_berthing_advisory 渲染失敗")
         render_detail_report(res, sidebar_data, df_detail, analyzer)
 
     with tab2:
@@ -526,9 +397,9 @@ if st.session_state.result:
         )
 
     with tab4:
-        render_data_list(df_detail, analyzer, sidebar_data)
+        render_data_list(df_detail)
 
-elif not st.session_state.result:
+elif not st.session_state.analyzer:
     render_welcome_page()
 
 

@@ -91,14 +91,9 @@ class WindThreshold:
 
 @dataclass(frozen=True)
 class RiskThresholds:
-    """
-    所有氣象風險閾值 — 與 n8n_weather_monitor.py RISK_THRESHOLDS 及
-    ui_components._GUST/WIND_THR 保持一致：
-      wind : caution=22 / warning=28 / danger=34  kts
-      gust : caution=28 / warning=34 / danger=41  kts
-    """
-    wind: WindThreshold = field(default_factory=lambda: WindThreshold(22, 28, 34))
-    gust: WindThreshold = field(default_factory=lambda: WindThreshold(28, 34, 41))
+    """所有氣象風險閾值"""
+    wind: WindThreshold = field(default_factory=lambda: WindThreshold(25, 35, 45))
+    gust: WindThreshold = field(default_factory=lambda: WindThreshold(35, 45, 55))
 
 
 THRESHOLDS = RiskThresholds()
@@ -239,6 +234,7 @@ BEAUFORT_THRESHOLDS: List[float] = list(BEAUFORT.thresholds)
 
 # 將各種輸入欄位名稱統一映射為內部標準名稱
 FIELD_MAPPING: Dict[str, str] = {
+    # ── 原有欄位（不變）──────────────────────────────────────
     "time":           "time",
     "datetime":       "time",
     "wind_speed":     "wind_speed_kts",
@@ -254,6 +250,16 @@ FIELD_MAPPING: Dict[str, str] = {
     "wave_max_m":     "wave_max_m",
     "wave_period":    "wave_period_s",
     "wave_period_s":  "wave_period_s",
+    # ── 新增：AWT API 特有欄位映射 ───────────────────────────
+    # AwtWeatherRecord.to_dict() 輸出的欄位，供 normalize_dataframe 識別
+    "visibility_nm":        "visibility_nm",
+    "pilot_visibility_nm":  "pilot_visibility_nm",
+    "berthing_risk_score":  "berthing_risk_score",
+    "berthing_risk_label":  "berthing_risk_label",
+    "current_speed_ms":     "current_speed_ms",
+    "current_dir_deg":      "current_dir_deg",
+    "relative_humidity":    "relative_humidity",
+    "air_temp_c":           "air_temp_c",
 }
 
 
@@ -295,12 +301,22 @@ class AppConfig:
 
     @staticmethod
     def validate() -> bool:
-        """
-        驗證所有必要設定是否存在。
-        回傳 True 表示設定完整，False 表示有缺漏（已記錄警告）。
-        """
         ok = True
         if not AppConfig.perplexity_api_key():
             logger.warning("❌ 缺少 PERPLEXITY_API_KEY")
             ok = False
+        # 新增：AWT 憑證檢查
+        if not os.getenv("AWT_USERNAME"):
+            logger.warning("❌ 缺少 AWT_USERNAME")
+            ok = False
+        if not os.getenv("AWT_PASSWORD"):
+            logger.warning("❌ 缺少 AWT_PASSWORD")
+            ok = False
         return ok
+    @staticmethod
+    def awt_api_base() -> str:
+        """讀取 AWT API Base URL，預設為 StormGeo 正式環境"""
+        return os.getenv(
+            "AWT_API_BASE_URL",
+            "https://api-shipping.stormgeo.com/api/v1",
+        )
