@@ -1,6 +1,4 @@
 # awt_crawler.py
-# StormGeo (AWT) s-Insight Port Forecast API 客戶端
-
 import base64
 import logging
 import time
@@ -13,7 +11,6 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 logger = logging.getLogger(__name__)
 
 # ================= 常數 =================
@@ -27,13 +24,9 @@ RETRY_BACKOFF         = 1.5
 FORECAST_DAYS_DEFAULT = 3
 SSL_VERIFY            = False
 
-_SESSION_WARMUP_DELAY = 1.5
-
 _WARMUP_ENDPOINTS = [
-    '/ports',
-    '/user/profile',
-    '/dashboard',
-    '',
+    '/documentation',
+    '/documentation/open-api/v1',
 ]
 
 _DEG_TO_DIR: List[Tuple[float, str]] = [
@@ -42,6 +35,333 @@ _DEG_TO_DIR: List[Tuple[float, str]] = [
     (191.25, 'S'),   (213.75, 'SSW'), (236.25, 'SW'),  (258.75, 'WSW'),
     (281.25, 'W'),   (303.75, 'WNW'), (326.25, 'NW'),  (348.75, 'NNW'),
 ]
+
+# ================= AWT Station ID 完整對照表 =================
+# 來源：WHL_all_ports_list.xlsx — 欄位「Station ID (AWT)」
+# key   = Port_Code_5（上游傳入）
+# value = Station ID (AWT)（實際送入 API 的 unLocode）
+# 所有港口一律使用 Station ID (AWT)，不再 fallback 至 Port_Code_5
+AWT_STATION_ID_MAP: Dict[str, str] = {
+    # United Arab Emirates
+    "AEJEA": "AEJEA",   # JEBEL ALI
+    # China
+    "CNDLC": "CNDAL",   # DALIAN
+    "CNFOC": "CNFZH",   # FUZHOU
+    "CNHSK": "CNTNJ",   # TIANJIN
+    "CNJIA": "CNJIX",   # JIAXING
+    "CNLYG": "CNLYG",   # LIANYUNGANG
+    "CNNGB": "CNNBO",   # NINGBO
+    "CNXIA": "CNXIA",   # 蝦峙門
+    "CNNSS": "CNNSA",   # NANSHA
+    "CNQZH": "CNQZL",   # QUANZHOU
+    "CNRZH": "CNRZH",   # RIZHAO
+    "CNSHA": "CNSGH",   # SHANGHAI
+    "CNZOS": "CNZOS",   # ZHOUSHAN
+    "CNSKU": "CNSHK",   # SHEKOU
+    "CNTAO": "CNQIN",   # QINGDAO
+    "CNXMN": "CNXAM",   # XIAMEN
+    "CNYTN": "CNYTN",   # YANTIAN
+    "CNZHA": "CNZHA",   # ZHANJIANG
+    # Colombia
+    "COBUN": "COBUN",   # BUENAVENTURA
+    # Ecuador
+    "ECGYE": "ECGYE",   # GUAYAQUIL
+    # Egypt
+    "EGSOK": "EGSOK",   # SOKHNA
+    # Guatemala
+    "GTPRQ": "GTPRQ",   # PUERTO QUETZAL
+    # Hong Kong
+    "HKHKG": "HKHKG",   # HONG KONG
+    # Indonesia
+    "IDBLW": "IDBLW",   # BELAWAN
+    "IDJKT": "IDOJ",    # JAKARTA
+    "IDSRG": "IDSRG",   # SEMARANG
+    "IDSUB": "IDSUB",   # SURABAYA
+    # India
+    "INCOK": "INCOK",   # COCHIN
+    "INKAT": "INKAT",   # KATTUPALLI
+    "INMAA": "INMAA",   # CHENNAI
+    "INMUN": "INMUN",   # MUNDRA
+    "INNSA": "INNSA1",  # NHAVA SHEVA
+    "INTUT": "INTUT",   # TUTICORIN
+    "INVIZ": "INVTZ",   # VISAKHAPATNAM
+    # Japan
+    "JPCHB": "JPCHB",   # CHIBA
+    "JPFKY": "JPFKY",   # FUKUYAMA
+    "JPHIJ": "JPHIJ",   # HIROSHIMA
+    "JPHKT": "JPHKT",   # HAKATA
+    "JPKWS": "JPKWS",   # KAWASAKI
+    "JPMIZ": "JPMIZ",   # MIZUSHIMA
+    "JPMOJ": "JPMOJ",   # MOJI
+    "JPNGO": "JPNGO",   # NAGOYA
+    "JPOSA": "JPOSA",   # OSAKA
+    "JPSMZ": "JPSMZ",   # SHIMIZU
+    "JPTYO": "JPTYO",   # TOKYO
+    "JPUKB": "JPUKB",   # KOBE
+    "JPYKK": "JPYKK",   # YOKKAICHI
+    "JPYOK": "JPYOK",   # YOKOHAMA
+    # Cambodia
+    "KHSIH": "KHKOS",   # SIHANOUKVILLE
+    # Korea
+    "KRINC": "KRINC",   # INCHEON
+    "KRPUS": "KRPUS",   # BUSAN
+    "KRUSN": "KRUSN",   # ULSAN
+    "KRBNP": "KRBNP",   # PUSAN NEWPORT
+    # Sri Lanka
+    "LKCMB": "LKCMB",   # COLOMBO
+    # Mexico
+    "MXESE": "MXESE",   # ENSENADA
+    "MXLZC": "MXLZC",   # LAZARO CARDENAS
+    "MXZLO": "MXZLO",   # MANZANILLO
+    # Malaysia
+    "MYBUT": "MYBWH",   # BUTTERWORTH
+    "MYPGU": "MYPGU",   # PASIR GUDANG
+    "MYPKG": "MYPKG",   # PORT KELANG
+    # Panama
+    "PACTB": "PACTB",   # CRISTOBAL
+    # Peru
+    "PECLL": "PECLL",   # CALLAO
+    # Philippines
+    "PHCEB": "PHCEB",   # CEBU CITY
+    "PHCGY": "PHCGY",   # CAGAYAN DE ORO
+    "PHDVO": "PHDVO",   # DAVAO
+    "PHMNN": "PHMNL",   # MANILA 北港
+    "PHMNS": "PHMNL",   # MANILA 南港
+    "PHSFS": "PHSFS",   # SUBIC BAY
+    # Pakistan
+    "PKBQM": "PKBQM1",  # BIN QASIM
+    # Saudi Arabia
+    "SAJED": "SAJED",   # JEDDAH
+    # Singapore
+    "SGSIN": "SGSCT",   # SINGAPORE
+    # Thailand
+    "THBKK": "THBKK",   # BANGKOK
+    "THLCH": "THLCH",   # LAEM CHABANG
+    # Taiwan
+    "TWKEL": "TWKEL",   # KEELUNG
+    "TWKHH": "TWKHH",   # KAOHSIUNG
+    "TWTPE": "TWTPE",   # TAIPEI
+    "TWTXG": "TWTXG",   # TAICHUNG
+    # United States
+    "USCHS": "USCHS",   # CHARLESTON
+    "USLAX": "USLAX",   # LOS ANGELES
+    "USNYC": "USNYC",   # NEW YORK
+    "USOAK": "USOAK",   # OAKLAND
+    "USORF": "USORF",   # NORFOLK
+    "USSAV": "USSAV",   # SAVANNAH
+    # Vietnam
+    "VNCLP": "VNCLN",   # CAI LAN
+    "VNHCH": "VNSGN",   # HO CHI MINH
+    "VNDAD": "VNDAD",   # DA NANG
+    "VNHPH": "VNHPH",   # HAIPHONG
+    "VNTCT": "VNCMT",   # Cai Mep
+    # Chile
+    "CLVAP": "CLVAP",   # VALPARAISO
+}
+
+# 無 Port_Code_5 的特殊港口（以自訂 key 存取，Station ID 為數字）
+AWT_NUMERIC_STATION_MAP: Dict[str, str] = {
+    "VUNG_TAU":        "6373",  # VUNG TAU P/S
+    "ZHOUSHAN_ISLAND": "8149",  # ZHOUSHAN ISLAND
+    "CNCJK":           "CNCJK", # CHANG JIANG KOU（Port_Code_5 空，WNI=NJK）
+}
+
+
+def _resolve_awt_locode(port_code: str,
+                        station_id: Optional[str] = None) -> Optional[str]:
+    """
+    決定實際送入 AWT API 的 unLocode，優先順序：
+
+    1. 呼叫端明確傳入 station_id → 直接使用（最高優先）
+    2. port_code 存在於 AWT_STATION_ID_MAP → 使用對照表的 Station ID (AWT)
+    3. port_code 存在於 AWT_NUMERIC_STATION_MAP → 使用數字 Station ID
+    4. 以上皆無 → 記錄 WARNING 並回傳 None（不再 fallback 至 port_code）
+
+    回傳 None 表示無法解析，呼叫端應跳過此港口。
+    """
+    # 1. 明確指定的 station_id 最優先
+    if station_id:
+        resolved = _normalize_locode(station_id)
+        if resolved:
+            logger.debug(
+                "🗺️  [%s] 使用明確指定的 station_id → %r", port_code, resolved)
+            return resolved
+        logger.warning(
+            "⚠️  station_id=%r 正規化後為空，繼續查詢對照表", station_id)
+
+    normalized_pc = _normalize_locode(port_code)
+
+    # 2. 查詢主對照表
+    if normalized_pc and normalized_pc in AWT_STATION_ID_MAP:
+        mapped = AWT_STATION_ID_MAP[normalized_pc]
+        logger.debug(
+            "🗺️  [%s] AWT_STATION_ID_MAP: %r → %r",
+            port_code, normalized_pc, mapped,
+        )
+        return mapped
+
+    # 3. 查詢數字/特殊對照表
+    if normalized_pc and normalized_pc in AWT_NUMERIC_STATION_MAP:
+        mapped = AWT_NUMERIC_STATION_MAP[normalized_pc]
+        logger.debug(
+            "🗺️  [%s] AWT_NUMERIC_STATION_MAP: %r → %r",
+            port_code, normalized_pc, mapped,
+        )
+        return mapped
+
+    # 4. 找不到 → 不猜測，直接回 None
+    logger.warning(
+        "⚠️  [%s] 在 AWT_STATION_ID_MAP 中找不到對應的 Station ID，跳過此港口。"
+        "請將此港口加入對照表。",
+        port_code,
+    )
+    return None
+
+
+# ================= UN/LOCODE 工具 =================
+
+def _normalize_locode(code: Optional[str]) -> Optional[str]:
+    if not code:
+        return None
+    s = str(code).strip().upper()
+    if s in ('', '0', 'NAN', 'N/A', '#N/A', 'NONE', 'NULL'):
+        return None
+    return s
+
+
+# ================= 安全型別轉換 =================
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    try:
+        if val is None:
+            return default
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float_or_none(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+# ================= 登入管理器 =================
+
+class AwtLoginManager:
+
+    def __init__(self, username: str, password: str,
+                 api_base: str = DEFAULT_API_BASE,
+                 verify_ssl: bool = SSL_VERIFY):
+        self.username   = username
+        self.password   = password
+        self.api_base   = api_base.rstrip('/')
+        self.verify_ssl = verify_ssl
+        self._token: Optional[str]             = None
+        self._token_expiry: Optional[datetime] = None
+        self._session = _build_session(verify_ssl=verify_ssl)
+
+    def _is_token_valid(self) -> bool:
+        return bool(
+            self._token
+            and self._token_expiry
+            and datetime.now(timezone.utc) < self._token_expiry
+        )
+
+    def get_token(self) -> str:
+        if not self._is_token_valid():
+            logger.info("AWT Token 不存在或已過期，正在重新登入...")
+            self._login()
+        return self._token  # type: ignore[return-value]
+
+    def _login(self) -> None:
+        url = f"{self.api_base}/auth/login"
+        headers = {
+            "Authorization": _build_basic_auth_header(self.username, self.password),
+            "Content-Type":  "application/json",
+        }
+        try:
+            resp = self._session.post(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            data  = resp.json()
+            token = (
+                data.get('token')
+                or data.get('accessToken')
+                or data.get('access_token')
+                or data.get('jwt')
+            )
+            if not token:
+                raise RuntimeError(
+                    f"AWT 登入成功但找不到 Token 欄位，回應: {data}")
+
+            self._token        = token
+            self._token_expiry = (datetime.now(timezone.utc)
+                                  + timedelta(minutes=TOKEN_EXPIRY_MINUTES))
+            logger.info("✅ AWT 登入成功，Token 有效至 %s UTC",
+                        self._token_expiry.strftime('%H:%M:%S'))
+            self._activate_web_session()
+
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 'N/A'
+            body   = e.response.text[:300]  if e.response is not None else ''
+            raise RuntimeError(f"AWT 登入失敗 (HTTP {status}): {body}") from e
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"AWT 登入網路錯誤: {e}") from e
+
+    def _activate_web_session(self) -> None:
+        if not self._token:
+            return
+        headers = {
+            'Authorization': f'Bearer {self._token}',
+            'Accept':        'application/json',
+            'Content-Type':  'application/json',
+        }
+        warmup_success = False
+        for endpoint in _WARMUP_ENDPOINTS:
+            url = f"{self.api_base}{endpoint}"
+            try:
+                resp = self._session.get(
+                    url, headers=headers,
+                    timeout=10, verify=self.verify_ssl,
+                )
+                if resp.status_code in (200, 201, 204):
+                    logger.info(
+                        "✅ API 連線驗證成功（端點: %s，狀態: %d）",
+                        endpoint, resp.status_code,
+                    )
+                    warmup_success = True
+                    break
+                else:
+                    logger.debug(
+                        "   驗證端點 %s 回應 %d，嘗試下一個",
+                        endpoint, resp.status_code,
+                    )
+            except requests.exceptions.RequestException as e:
+                logger.debug("   驗證端點 %s 失敗: %s", endpoint, e)
+
+        if not warmup_success:
+            logger.warning("⚠️  API 文件端點無回應，Token 仍有效，繼續執行")
+        else:
+            logger.debug("   等待連線穩定（1.0s）...")
+            time.sleep(1.0)
+
+    def get_auth_headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.get_token()}",
+            "Content-Type":  "application/json",
+            "Accept":        "application/json",
+        }
+
+    def log_rate_limit(self, response: requests.Response) -> None:
+        limit     = response.headers.get('X-RateLimit-Limit')
+        remaining = response.headers.get('X-RateLimit-Remaining')
+        reset     = response.headers.get('X-RateLimit-Reset')
+        if limit or remaining:
+            logger.debug("Rate Limit → 上限: %s，剩餘: %s，重置: %s",
+                         limit, remaining, reset)
 
 
 def _deg_to_compass(degrees: Optional[float]) -> str:
@@ -78,250 +398,9 @@ def _build_session(max_retries: int = MAX_RETRIES,
     return session
 
 
-# ================= 登入管理器 =================
-
-class AwtLoginManager:
-
-    def __init__(self, username: str, password: str,
-                 api_base: str = DEFAULT_API_BASE,
-                 verify_ssl: bool = SSL_VERIFY):
-        self.username   = username
-        self.password   = password
-        self.api_base   = api_base.rstrip('/')
-        self.verify_ssl = verify_ssl
-        self._token: Optional[str]             = None
-        self._token_expiry: Optional[datetime] = None
-        # ✅ 唯一的 Session，登入 Cookie 與後續 API 請求共用
-        self._session = _build_session(verify_ssl=verify_ssl)
-
-    def _is_token_valid(self) -> bool:
-        return bool(
-            self._token
-            and self._token_expiry
-            and datetime.now(timezone.utc) < self._token_expiry
-        )
-
-    def get_token(self) -> str:
-        if not self._is_token_valid():
-            logger.info("AWT Token 不存在或已過期，正在重新登入...")
-            self._login()
-        return self._token  # type: ignore[return-value]
-
-    def _login(self) -> None:
-        url = f"{self.api_base}/auth/login"
-        headers = {
-            "Authorization": _build_basic_auth_header(self.username, self.password),
-            "Content-Type": "application/json",
-        }
-        try:
-            resp = self._session.post(url, headers=headers, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            data  = resp.json()
-            token = (
-                data.get('token')
-                or data.get('accessToken')
-                or data.get('access_token')
-                or data.get('jwt')
-            )
-            if not token:
-                raise RuntimeError(
-                    f"AWT 登入成功但找不到 Token 欄位，回應: {data}")
-
-            self._token        = token
-            self._token_expiry = (datetime.now(timezone.utc)
-                                  + timedelta(minutes=TOKEN_EXPIRY_MINUTES))
-            logger.info("✅ AWT 登入成功，Token 有效至 %s UTC",
-                        self._token_expiry.strftime('%H:%M:%S'))
-
-            # 登入後立即暖機，建立 Web Session
-            self._activate_web_session()
-
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response is not None else 'N/A'
-            body   = e.response.text[:300]  if e.response is not None else ''
-            raise RuntimeError(f"AWT 登入失敗 (HTTP {status}): {body}") from e
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"AWT 登入網路錯誤: {e}") from e
-
-    def _activate_web_session(self) -> None:
-        """
-        登入後暖機：依序嘗試多個端點，確認 Session 建立。
-        """
-        if not self._token:
-            return
-
-        headers = {
-            'Authorization': f'Bearer {self._token}',
-            'Accept':        'application/json',
-            'Content-Type':  'application/json',
-            'User-Agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/124.0.0.0 Safari/537.36'
-            ),
-        }
-
-        warmup_success = False
-        for endpoint in _WARMUP_ENDPOINTS:
-            url = f"{self.api_base}{endpoint}"
-            try:
-                resp = self._session.get(
-                    url, headers=headers,
-                    timeout=10, verify=self.verify_ssl,
-                )
-                if resp.status_code in (200, 201, 204):
-                    logger.info(
-                        "✅ Web Session 暖機成功（端點: %s，狀態: %d）",
-                        endpoint or '/', resp.status_code,
-                    )
-                    warmup_success = True
-                    break
-                else:
-                    logger.debug(
-                        "   暖機端點 %s 回應 %d，嘗試下一個",
-                        endpoint or '/', resp.status_code,
-                    )
-            except requests.exceptions.RequestException as e:
-                logger.debug("   暖機端點 %s 失敗: %s", endpoint or '/', e)
-
-        if not warmup_success:
-            logger.warning(
-                "⚠️  Web Session 暖機端點均無回應，改用延遲 5.0s 作為 fallback"
-            )
-            time.sleep(5.0)
-            return
-
-        # 暖機成功後等待，確保後端 Session 完全建立
-        logger.debug("   等待 Session 建立（3.0s）...")
-        time.sleep(3.0)
-
-        # 二次確認：用真實港口請求驗證 Session 可用
-        self._verify_session_with_real_request(headers)
-
-    def _verify_session_with_real_request(
-            self, headers: Dict[str, str]) -> None:
-        """
-        暖機後用已知港口（新加坡 SGSIN）發一次真實 forecast 請求，
-        確認 Session 真正可用。失敗時最多重試 3 次，每次間隔遞增。
-        ✅ 修正：移除重複定義，只保留此有重試邏輯的版本。
-        """
-        verify_url = f"{self.api_base}/ports/SGSIN/forecasts"
-
-        for attempt in range(1, 4):
-            try:
-                resp = self._session.get(
-                    verify_url, headers=headers,
-                    params={"Days": 1},
-                    timeout=15, verify=self.verify_ssl,
-                )
-                if resp.status_code == 200:
-                    logger.info(
-                        "✅ Session 驗證成功（SGSIN 測試請求 200，嘗試 %d 次）",
-                        attempt,
-                    )
-                    return
-                elif resp.status_code == 401:
-                    logger.warning(
-                        "   Session 驗證 401，重新取得 Token（嘗試 %d）...",
-                        attempt,
-                    )
-                    # ✅ 直接更新 header，不遞迴呼叫 _login() 避免無限循環
-                    self._token        = None
-                    self._token_expiry = None
-                    self.get_token()
-                    headers = {
-                        'Authorization': f'Bearer {self._token}',
-                        'Accept':        'application/json',
-                        'Content-Type':  'application/json',
-                    }
-                else:
-                    wait = 2.0 * attempt
-                    logger.warning(
-                        "   Session 驗證回應 %d（嘗試 %d），等待 %.1fs...",
-                        resp.status_code, attempt, wait,
-                    )
-                    time.sleep(wait)
-
-            except requests.exceptions.RequestException as e:
-                wait = 2.0 * attempt
-                logger.warning(
-                    "   Session 驗證請求失敗（嘗試 %d）: %s，等待 %.1fs...",
-                    attempt, e, wait,
-                )
-                time.sleep(wait)
-
-        logger.warning("⚠️  Session 驗證 3 次均失敗，繼續執行（可能有部分 404）")
-
-    def get_auth_headers(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.get_token()}",
-            "Content-Type":  "application/json",
-            "Accept":        "application/json",
-            "User-Agent": (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/124.0.0.0 Safari/537.36'
-            ),
-        }
-
-    def log_rate_limit(self, response: requests.Response) -> None:
-        limit     = response.headers.get('X-RateLimit-Limit')
-        remaining = response.headers.get('X-RateLimit-Remaining')
-        reset     = response.headers.get('X-RateLimit-Reset')
-        if limit or remaining:
-            logger.debug("Rate Limit → 上限: %s，剩餘: %s，重置: %s",
-                         limit, remaining, reset)
-
-
 # ================= Port Forecast 解析 =================
-#
-# 實際 API 回傳結構（已確認）：
-# [
-#   {
-#     "unLocode": "TWKHH",
-#     "portForecast": {
-#       "wind":        { "direction": 262, "speed": 5.44, "gust": 8.16 },
-#                                          ↑ 單位：knots（已由網站資料交叉驗證確認）
-#       "temperature": { "air": 26.3 },
-#       "swell":       { "height": 0.57 },
-#       "wave":        { "sigWaveHeight": 0.57, "sigWaveDirection": 233,
-#                        "windWaveHeight": 0.09, "maxHeight": 0.9 },
-#       "precipitation": { "inThreeHours": 0, "inSixHours": 0 },
-#       "visibility": 10,
-#       "relativeHumidity": 72,
-#       "currentDirection": 350,
-#       "currentSpeed": 0.08,
-#       "date": "2026-04-14T06:00:00Z",
-#       "timeZoneOffset": 8
-#     },
-#     "pilotForecast": {
-#       "wind":  { "direction": 280, "speed": 5.44, "gust": 6.86 },
-#       "swell": { "height": 0.53, "period": 6.4, "direction": 234 },
-#       "wave":  { "sigWaveHeight": 0.54, "sigWaveDirection": 236,
-#                  "windWaveHeight": 0.11, "windWavePeriod": 1.7,
-#                  "windWaveDirection": 286, "maxHeight": 1.0044 },
-#       "temperature":   { "air": 26.7, "seaSurface": 26.75 },
-#       "visibility": 10.7991,
-#       "relativeHumidity": 72,
-#       "currentDirection": 24,
-#       "currentSpeed": 0.105,
-#       "date": "2026-04-14T12:00:00Z",
-#       "timeZoneOffset": 8
-#     }
-#   },
-#   ...
-# ]
 
-_KTS_TO_MS = 0.514444   # knots → m/s
-
-
-def _safe_float(val: Any, default: float = 0.0) -> float:
-    try:
-        if val is None:
-            return default
-        return float(val)
-    except (TypeError, ValueError):
-        return default
+_KTS_TO_MS = 0.514444
 
 
 def _parse_forecast_entry(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -346,79 +425,54 @@ def _parse_new_format(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     valid_time = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
 
-    wind   = pf.get('wind')          or {}
-    wave   = pf.get('wave')          or {}
-    swell  = pf.get('swell')         or {}
-    temp   = pf.get('temperature')   or {}
+    wind   = pf.get('wind')   or {}
+    wave   = pf.get('wave')   or {}
+    swell  = pf.get('swell')  or {}
+    temp   = pf.get('temperature') or {}
     precip = pf.get('precipitation') or {}
 
-    # ── portForecast 風速（API 回傳單位：knots）────────────────────
     wind_speed_kts = _safe_float(wind.get('speed'))
     wind_dir_deg   = wind.get('direction')
     wind_gust_kts  = _safe_float(wind.get('gust'))
     wind_speed_ms  = round(wind_speed_kts * _KTS_TO_MS, 4)
     wind_gust_ms   = round(wind_gust_kts  * _KTS_TO_MS, 4)
 
-    # ── portForecast 浪高（保留原始 port 值，不被 pilot 覆蓋）──────
-    port_wave_height_m = (
-        _safe_float(wave.get('sigWaveHeight'))
-        or _safe_float(swell.get('height'))
-    )
-    port_wave_max_m  = _safe_float(wave.get('maxHeight'))
-    port_wave_dir    = wave.get('sigWaveDirection')
-    port_swell_h     = _safe_float(swell.get('height'))
+    wave_height_m = _safe_float_or_none(wave.get('sigWaveHeight'))
+    if wave_height_m is None:
+        wave_height_m = _safe_float_or_none(swell.get('height'))
 
-    # ── portForecast 能見度 ────────────────────────────────────────
-    # AWT API visibility 欄位：
-    #   portForecast.visibility  → 單位 NM（如 10 = 10 NM）
-    #   pilotForecast.visibility → 單位 NM（如 10.7991 = 10.8 NM）
-    port_vis_raw = pf.get('visibility')
-    port_vis_nm  = float(port_vis_raw) if port_vis_raw is not None else None
-
-    air_temp_c   = _safe_float(temp.get('air'))
-    precip_3h_mm = _safe_float(precip.get('inThreeHours'))
-    precip_6h_mm = _safe_float(precip.get('inSixHours'))
-
-    # ── pilotForecast（允許缺筆，所有欄位可為 None）────────────────
-    pilot      = entry.get('pilotForecast')
-    pilot_data: Dict[str, Any] = {
-        # pilot 缺筆時，所有欄位預設 None
-        'pilot_wind_speed_kts':     None,
-        'pilot_wind_gust_kts':      None,
-        'pilot_wind_speed_ms':      None,
-        'pilot_wind_dir_deg':       None,
-        'pilot_wind_gust_ms':       None,
-        'pilot_swell_height_m':     None,
-        'pilot_swell_period_s':     None,
-        'pilot_swell_dir_deg':      None,
-        'pilot_wave_height_m':      None,   # ✅ pilotForecast.wave.sigWaveHeight
-        'pilot_wave_max_m':         None,
-        'pilot_wave_dir_deg':       None,
-        'pilot_wind_wave_height_m': None,
-        'pilot_wind_wave_period_s': None,
-        'pilot_wind_wave_dir_deg':  None,
-        'pilot_sea_surface_temp_c': None,
-        'pilot_current_dir_deg':    None,
-        'pilot_current_speed_ms':   None,
-        'pilot_visibility_nm':      None,   # ✅ 統一用 _nm，不用 _km
-    }
-
+    wave_max_m    = _safe_float_or_none(wave.get('maxHeight'))
+    wave_dir_deg  = wave.get('sigWaveDirection')
     wave_period_s: Optional[float] = None
 
+    air_temp_c    = _safe_float_or_none(temp.get('air'))
+    visibility_km = _safe_float(pf.get('visibility'), default=99.0)
+    precip_3h_mm  = _safe_float_or_none(precip.get('inThreeHours'))
+    precip_6h_mm  = _safe_float_or_none(precip.get('inSixHours'))
+
+    pilot      = entry.get('pilotForecast')
+    pilot_data: Dict[str, Any] = {}
+
     if isinstance(pilot, dict):
-        p_wind  = pilot.get('wind')        or {}
-        p_swell = pilot.get('swell')       or {}
-        p_wave  = pilot.get('wave')        or {}
+        p_wind  = pilot.get('wind')  or {}
+        p_swell = pilot.get('swell') or {}
+        p_wave  = pilot.get('wave')  or {}
         p_temp  = pilot.get('temperature') or {}
 
-        wave_period_s = _safe_float(p_swell.get('period')) or None
+        wave_period_s = _safe_float_or_none(p_swell.get('period'))
+
+        if wave_height_m is None:
+            wave_height_m = _safe_float_or_none(p_wave.get('sigWaveHeight'))
+        if wave_height_m is None:
+            wave_height_m = _safe_float_or_none(p_swell.get('height'))
+        if wave_max_m is None:
+            wave_max_m = _safe_float_or_none(p_wave.get('maxHeight'))
+        if wave_dir_deg is None:
+            wave_dir_deg = (p_wave.get('sigWaveDirection')
+                            or p_swell.get('direction'))
 
         p_wind_speed_kts = _safe_float(p_wind.get('speed'))
         p_wind_gust_kts  = _safe_float(p_wind.get('gust'))
-
-        # ✅ pilot visibility 單位：NM，直接使用
-        p_vis_raw = pilot.get('visibility')
-        p_vis_nm  = float(p_vis_raw) if p_vis_raw is not None else None
 
         pilot_data = {
             'pilot_wind_speed_kts':     p_wind_speed_kts,
@@ -426,64 +480,47 @@ def _parse_new_format(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             'pilot_wind_speed_ms':      round(p_wind_speed_kts * _KTS_TO_MS, 4),
             'pilot_wind_dir_deg':       p_wind.get('direction'),
             'pilot_wind_gust_ms':       round(p_wind_gust_kts  * _KTS_TO_MS, 4),
-            'pilot_swell_height_m':     _safe_float(p_swell.get('height'))  or None,
-            'pilot_swell_period_s':     _safe_float(p_swell.get('period'))  or None,
+            'pilot_swell_height_m':     _safe_float_or_none(p_swell.get('height')),
+            'pilot_swell_period_s':     _safe_float_or_none(p_swell.get('period')),
             'pilot_swell_dir_deg':      p_swell.get('direction'),
-            # ✅ pilotForecast.wave.sigWaveHeight（引水點有效波高）
-            'pilot_wave_height_m':      _safe_float(p_wave.get('sigWaveHeight')) or None,
-            'pilot_wave_max_m':         _safe_float(p_wave.get('maxHeight'))     or None,
+            'pilot_wave_height_m':      _safe_float_or_none(p_wave.get('sigWaveHeight')),
+            'pilot_wave_max_m':         _safe_float_or_none(p_wave.get('maxHeight')),
             'pilot_wave_dir_deg':       p_wave.get('sigWaveDirection'),
-            'pilot_wind_wave_height_m': _safe_float(p_wave.get('windWaveHeight')) or None,
-            'pilot_wind_wave_period_s': _safe_float(p_wave.get('windWavePeriod')) or None,
+            'pilot_wind_wave_height_m': _safe_float_or_none(p_wave.get('windWaveHeight')),
+            'pilot_wind_wave_period_s': _safe_float_or_none(p_wave.get('windWavePeriod')),
             'pilot_wind_wave_dir_deg':  p_wave.get('windWaveDirection'),
-            'pilot_sea_surface_temp_c': _safe_float(p_temp.get('seaSurface'))    or None,
+            'pilot_sea_surface_temp_c': _safe_float_or_none(p_temp.get('seaSurface')),
             'pilot_current_dir_deg':    pilot.get('currentDirection'),
-            'pilot_current_speed_ms':   _safe_float(pilot.get('currentSpeed'))   or None,
-            # ✅ 統一用 pilot_visibility_nm（awt_parser.py 期待此欄位名稱）
-            'pilot_visibility_nm':      p_vis_nm,
+            'pilot_current_speed_ms':   _safe_float_or_none(pilot.get('currentSpeed')),
+            'pilot_visibility_km':      _safe_float_or_none(pilot.get('visibility')),
         }
 
     return {
         'un_locode':       entry.get('unLocode'),
         'valid_time':      valid_time,
         'timezone_offset': pf.get('timeZoneOffset'),
-
-        # ── 風（kts，API 原始單位）
         'wind_speed_kts':  wind_speed_kts,
         'wind_dir_deg':    wind_dir_deg,
         'wind_gust_kts':   wind_gust_kts,
         'wind_speed_ms':   wind_speed_ms,
         'wind_gust_ms':    wind_gust_ms,
-
-        # ── portForecast 浪（保留獨立欄位，不被 pilot 覆蓋）
-        'port_wave_height_m': port_wave_height_m,   # ✅ 新增，供 UI 對比
-        'port_wave_max_m':    port_wave_max_m,       # ✅ 新增，供 UI 對比
-        'port_swell_height_m': port_swell_h,
-
-        # ── 向下相容欄位（analysis.py / WeatherRecord 使用）
-        'wave_height_m':   port_wave_height_m,
-        'wave_max_m':      port_wave_max_m,
+        'wave_height_m':   wave_height_m,
+        'wave_max_m':      wave_max_m,
         'wave_period_s':   wave_period_s,
-        'wave_dir_deg':    port_wave_dir,
-        'sig_wave_m':      port_wave_height_m,
-        'max_wave_m':      port_wave_max_m,
-        'swell_height_m':  port_swell_h,
-
-        # ── 環境
+        'wave_dir_deg':    wave_dir_deg,
+        'sig_wave_m':      wave_height_m,
+        'max_wave_m':      wave_max_m,
         'air_temp_c':          air_temp_c,
-        'wind_wave_height_m':  _safe_float(wave.get('windWaveHeight')),
-        # ✅ visibility 單位統一為 NM
-        'visibility_nm':       port_vis_nm,
-        'visibility_km':       port_vis_nm,   # 保留向下相容，值同 NM
+        'swell_height_m':      _safe_float_or_none(swell.get('height')),
+        'wind_wave_height_m':  _safe_float_or_none(wave.get('windWaveHeight')),
+        'visibility_km':       visibility_km,
+        'visibility_nm':       visibility_km,
         'relative_humidity':   pf.get('relativeHumidity'),
         'current_dir_deg':     pf.get('currentDirection'),
-        'current_speed_ms':    _safe_float(pf.get('currentSpeed')),
+        'current_speed_ms':    _safe_float_or_none(pf.get('currentSpeed')),
         'precip_3h_mm':        precip_3h_mm,
         'precip_6h_mm':        precip_6h_mm,
-
-        # ── pilotForecast（缺筆時全為 None，不影響 port 資料顯示）
         **pilot_data,
-
         '_raw': entry,
     }
 
@@ -501,17 +538,17 @@ def _parse_legacy_format(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     wind_speed_kts = _safe_float(wx.get('windSpeed'))
     wind_gust_kts  = _safe_float(wx.get('windGust'))
-    sig_wave_m     = _safe_float(wx.get('significantWaveHeight'))
-    max_wave_m     = _safe_float(wx.get('maxWaveHeight'))
-    air_temp_c     = _safe_float(wx.get('airTemperature'))
+    sig_wave_m     = _safe_float_or_none(wx.get('significantWaveHeight'))
+    max_wave_m     = _safe_float_or_none(wx.get('maxWaveHeight'))
+    air_temp_c     = _safe_float_or_none(wx.get('airTemperature'))
     visibility_km  = _safe_float(wx.get('visibility'), default=99.0)
-    precip_6h_mm   = _safe_float(wx.get('precipitation6h'))
+    precip_6h_mm   = _safe_float_or_none(wx.get('precipitation6h'))
     pressure_hpa   = _safe_float(wx.get('pressure'), default=1013.0)
 
     pilot          = entry.get('pilotConditions') or {}
     pilot_wind_kts = _safe_float(pilot.get('windSpeed'))
     pilot_gust_kts = _safe_float(pilot.get('windGust'))
-    pilot_wave_m   = _safe_float(pilot.get('waveHeight'))
+    pilot_wave_m   = _safe_float_or_none(pilot.get('waveHeight'))
 
     return {
         'un_locode':       entry.get('unLocode'),
@@ -564,43 +601,46 @@ def _extract_forecast_list(raw: Any) -> List[Any]:
 # ================= Port Forecast 下載器 =================
 
 class AwtWeatherFetcher:
+    """
+    文件端點：GET /ports/{unLocode}/forecasts?Days={days}
+
+    所有港口一律透過 AWT_STATION_ID_MAP 將 Port_Code_5
+    轉換為正確的 Station ID (AWT) 後送入 API。
+    """
 
     def __init__(self, login: AwtLoginManager,
                  api_base: str = AWT_API_BASE):
         self.login    = login
         self.api_base = api_base.rstrip('/')
-        # ✅ 修正一：直接共用 LoginManager 的 Session
-        #    確保登入後的 Cookie 在後續 API 請求中一併帶出
         self._session = login._session
 
     def fetch_port_weather(
         self,
         port_code:  str,
         days:       int = 2,
-        station_id: Optional[str] = None,   # 現在傳入的是正確的 AWT ID（如 6375）
+        station_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        """
+        取得港口天氣預報。
+
+        Args:
+            port_code:  Port_Code_5，例如 'TWKHH'、'CNSHA'
+            days:       預報天數，1–10，預設 2
+            station_id: 明確指定 AWT Station ID（最高優先，可覆蓋對照表）
+
+        Returns:
+            解析後的預報資料列表，依時間排序。
+        """
         days = max(1, min(days, 10))
 
-        def _clean_station_id(raw: Optional[str]) -> Optional[str]:
-            if not raw:
-                return None
-            s = str(raw).strip()
-            if s.lower() in ('', '0', 'nan', 'n/a', '#n/a', 'none', 'null'):
-                return None
-            try:
-                return str(int(float(s)))
-            except (ValueError, TypeError):
-                return s
-
-        clean_sid = _clean_station_id(station_id)
-
-        # ✅ 優先用 AWT Station ID（如 6375），fallback 才用 LOCODE
-        primary_key  = clean_sid if clean_sid else port_code
-        fallback_key = port_code if clean_sid else None
+        api_key = _resolve_awt_locode(port_code, station_id)
+        if api_key is None:
+            # _resolve_awt_locode 已輸出 WARNING，此處直接跳過
+            return []
 
         logger.info(
-            "🔍 fetch_port_weather: port=%r, AWT_ID=%r → primary=%r",
-            port_code, station_id, primary_key,
+            "🔗 [%s] AWT Station ID=%r → %s/ports/%s/forecasts?Days=%d",
+            port_code, api_key, self.api_base, api_key, days,
         )
 
         try:
@@ -609,18 +649,10 @@ class AwtWeatherFetcher:
             logger.error("無法取得 Token，跳過港口 %s: %s", port_code, e)
             return []
 
-        raw_data = self._request_forecast(port_code, primary_key, days, headers)
-
-        # fallback：AWT ID 失敗時改用 LOCODE
-        if raw_data is None and fallback_key:
-            logger.warning(
-                "⚠️  AWT ID [%s] 無資料，fallback 用 LOCODE [%s]",
-                primary_key, fallback_key,
-            )
-            raw_data = self._request_forecast(
-                port_code, fallback_key, days, headers)
+        raw_data = self._request_forecast(port_code, api_key, days, headers)
 
         if raw_data is None:
+            logger.warning("❌ [%s] Station ID=%r 無資料回傳", port_code, api_key)
             return []
 
         raw_list = _extract_forecast_list(raw_data)
@@ -634,11 +666,10 @@ class AwtWeatherFetcher:
             if parsed is not None:
                 records.append(parsed)
 
-        logger.info("AWT %s (AWT_ID:%s): 解析 %d/%d 筆",
-                    port_code, primary_key, len(records), len(raw_list))
+        logger.info("AWT %s (Station ID=%s): 解析 %d/%d 筆",
+                    port_code, api_key, len(records), len(raw_list))
         records.sort(key=lambda r: r['valid_time'])
         return records
-
 
     def _request_forecast(
         self,
@@ -653,12 +684,14 @@ class AwtWeatherFetcher:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 logger.info(
-                    "📡 [Port Forecast] %s (ID:%s) days=%d (嘗試 %d/%d)",
-                    port_code, api_key, days, attempt, MAX_RETRIES)
+                    "📡 [Port Forecast] %s (Station ID=%s) days=%d (嘗試 %d/%d)",
+                    port_code, api_key, days, attempt, MAX_RETRIES,
+                )
 
                 resp = self._session.get(
                     url, headers=headers,
-                    params=params, timeout=REQUEST_TIMEOUT)
+                    params=params, timeout=REQUEST_TIMEOUT,
+                )
                 self.login.log_rate_limit(resp)
 
                 if resp.status_code == 401:
@@ -672,32 +705,33 @@ class AwtWeatherFetcher:
                     continue
 
                 if resp.status_code == 404:
-                    if attempt == 1:
-                        # 第一次 404：重新登入 + 暖機後重試
+                    if attempt < MAX_RETRIES:
+                        wait = 3.0 * attempt
                         logger.warning(
-                            "AWT %s (ID:%s) 404（嘗試 %d）— "
-                            "可能是 Session 未就緒，重新觸發暖機後重試...",
-                            port_code, api_key, attempt,
+                            "AWT %s 404（嘗試 %d），等待 %.1fs 後重試...",
+                            port_code, attempt, wait,
                         )
-                        try:
-                            self.login._login()
-                            headers = self.login.get_auth_headers()
-                        except RuntimeError as e:
-                            logger.error("重新登入失敗: %s", e)
-                            return None
+                        if attempt == 1:
+                            try:
+                                self.login._login()
+                                headers = self.login.get_auth_headers()
+                            except RuntimeError as e:
+                                logger.error("重新登入失敗: %s", e)
+                                return None
+                        time.sleep(wait)
                         continue
                     else:
-                        # 第二次以後的 404：確認無此資料
                         logger.warning(
-                            "AWT %s (ID:%s) 404（嘗試 %d）— "
-                            "確認無此資料，URL: %s",
-                            port_code, api_key, attempt, url,
+                            "AWT %s 404，已達最大重試次數 — "
+                            "請確認 Station ID [%s] 是否在帳號授權清單內",
+                            port_code, api_key,
                         )
                         return None
 
                 if resp.status_code == 429:
                     wait = RETRY_BACKOFF * (2 ** attempt)
-                    logger.warning("Rate Limit，等待 %.1fs", wait)
+                    logger.warning(
+                        "Rate Limit（300 hits/hour），等待 %.1fs", wait)
                     time.sleep(wait)
                     continue
 
@@ -708,7 +742,8 @@ class AwtWeatherFetcher:
             except requests.exceptions.Timeout:
                 logger.warning(
                     "AWT %s 請求逾時 (嘗試 %d/%d)",
-                    port_code, attempt, MAX_RETRIES)
+                    port_code, attempt, MAX_RETRIES,
+                )
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_BACKOFF * attempt)
 
@@ -724,11 +759,12 @@ class AwtWeatherFetcher:
             except requests.exceptions.RequestException as e:
                 logger.warning(
                     "AWT %s 請求失敗 (嘗試 %d/%d): %s",
-                    port_code, attempt, MAX_RETRIES, e)
+                    port_code, attempt, MAX_RETRIES, e,
+                )
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_BACKOFF * attempt)
 
-        logger.error("AWT %s 已達最大重試次數，放棄", port_code)
+        logger.error("AWT %s 已達最大重試次數，放棄", api_key)
         return None
 
 
